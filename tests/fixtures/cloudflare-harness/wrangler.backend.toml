@@ -1,0 +1,24 @@
+name = "backend-fixture"
+main = "src/backend.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[services]]
+binding = "CMS"
+service = "cms-fixture"
+
+[[durable_objects.bindings]]
+name = "APP_EVENTS"
+class_name = "AppEvents"
+
+[[durable_objects.bindings]]
+name = "COUNTER"
+class_name = "Counter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AppEvents"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Counter"]

@@ -1,0 +1,4 @@
+name = "cms-fixture"
+main = "src/cms.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
