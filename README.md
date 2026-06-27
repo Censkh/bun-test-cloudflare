@@ -17,14 +17,6 @@ bun add -d bun-test-cloudflare
 
 For a workspace package, use:
 
-```json
-{
-  "devDependencies": {
-    "bun-test-cloudflare": "workspace:^"
-  }
-}
-```
-
 ## Configure Bun
 
 Preload the setup before app-specific test setup:
