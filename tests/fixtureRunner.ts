@@ -39,6 +39,10 @@ export const expectBunFixtureToPass = (
     const hasFileDependency = dependencySpecs.some(
       (specifier) => typeof specifier === "string" && specifier.startsWith("file:"),
     );
+    if (hasFileDependency) {
+      fs.rmSync(path.join(fixtureRoot, "node_modules"), { force: true, recursive: true });
+      fs.rmSync(path.join(fixtureRoot, "bun.lock"), { force: true });
+    }
     const installResult = Bun.spawnSync({
       cmd: hasFileDependency
         ? [process.execPath, "install", "--no-save"]

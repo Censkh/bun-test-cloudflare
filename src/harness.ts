@@ -3,12 +3,19 @@ import { createTestHarness } from "wrangler";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
 
-export type CloudflareWorkerConfig = WorkerInput & {
+export type TypeToken<T> = {
+  readonly __type?: T;
+};
+
+export const typeToken = <T>(): TypeToken<T> => ({});
+
+export type CloudflareWorkerConfig<TBindings = Record<string, any>> = WorkerInput & {
+  bindings?: TypeToken<TBindings>;
   name?: string;
 };
 
 export type CloudflareWorkerMap<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
-  [TKey in keyof TWorkers]: WorkerHandle;
+  [TKey in keyof TWorkers]: WorkerHandle<WorkerBindings<TWorkers[TKey]>>;
 };
 
 export type CloudflareHarnessConfig<TWorkers extends Record<string, CloudflareWorkerConfig>> = Omit<
@@ -29,8 +36,22 @@ export type CloudflareHarness<TWorkers extends Record<string, CloudflareWorkerCo
 };
 
 const toWorkerInput = (worker: CloudflareWorkerConfig): WorkerInput => {
-  const { name: _name, ...input } = worker;
+  const { bindings: _bindings, name: _name, ...input } = worker;
   return input;
+};
+
+type WorkerBindings<TWorker> = TWorker extends { bindings?: TypeToken<infer TBindings> }
+  ? TBindings
+  : Record<string, any>;
+
+const logServerLogs = (server: TestHarness) => {
+  const logs = server.getLogs();
+  if (logs.length === 0) return;
+
+  console.error("[bun-test-cloudflare] Worker runtime logs before failure:");
+  for (const log of logs) {
+    console.error(JSON.stringify(log));
+  }
 };
 
 export const createCloudflareHarness = <const TWorkers extends Record<string, CloudflareWorkerConfig>>(
@@ -57,6 +78,9 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
       try {
         await server.listen();
         return await callback(getWorkers(), server);
+      } catch (error) {
+        logServerLogs(server);
+        throw error;
       } finally {
         await server.close();
       }

@@ -1,5 +1,7 @@
 # bun-test-cloudflare
 
+[![npm version](https://img.shields.io/npm/v/bun-test-cloudflare.svg)](https://www.npmjs.com/package/bun-test-cloudflare)
+
 Bun test compatibility and a typed harness wrapper for Cloudflare Workers projects that use Wrangler's `createTestHarness`.
 
 ## What It Provides
@@ -39,14 +41,19 @@ Create one test harness module for your package and export the configured harnes
 
 ```ts
 // src/tests/harness.ts
-import { createCloudflareHarness } from "bun-test-cloudflare";
+import { createCloudflareHarness, typeToken } from "bun-test-cloudflare";
 import path from "node:path";
+
+type BackendBindings = {
+  IMAGES_BUCKET: R2Bucket;
+};
 
 const packageRoot = path.resolve(import.meta.dir, "../..");
 
 export const harness = createCloudflareHarness({
   workers: {
     BACKEND: {
+      bindings: typeToken<BackendBindings>(),
       configPath: path.join(packageRoot, "wrangler.toml"),
       name: "my-backend-worker",
       vars: {
@@ -67,6 +74,7 @@ export type TestWorkers = ReturnType<typeof harness.workers>;
 ```
 
 The object keys become the typed worker handles passed to `run()`.
+The optional `bindings` token is type-only metadata for `worker.getEnv()` and is not passed to Wrangler.
 
 ## Use In Tests
 
@@ -108,7 +116,8 @@ The wrapped Wrangler server is available when needed:
 ```ts
 await harness.run(async (workers, server) => {
   const logs = server.getLogs();
-  const bucket = await workers.BACKEND.getR2Bucket("IMAGES_BUCKET");
+  const env = await workers.BACKEND.getEnv();
+  await env.IMAGES_BUCKET.put("fixture.png", new Uint8Array());
 });
 ```
 
