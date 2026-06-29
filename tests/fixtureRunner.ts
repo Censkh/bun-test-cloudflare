@@ -24,9 +24,34 @@ const findFixtureTests = (fixtureRoot: string): string[] => {
   return fixtureTests.sort();
 };
 
-export const expectBunFixtureToPass = (
+type BunFixtureResult = {
+  durationMs: number;
+  exitCode: number | null;
+  stderr: string;
+  stdout: string;
+  expectStatusCode(expectedStatusCode: number): void;
+};
+
+const createBunFixtureResult = (
   fixtureRoot: string,
-  options: { env?: NodeJS.ProcessEnv; logOutput?: boolean } = {},
+  result: Omit<BunFixtureResult, "expectStatusCode">,
+): BunFixtureResult => ({
+  ...result,
+  expectStatusCode(expectedStatusCode: number) {
+    if (result.exitCode !== expectedStatusCode) {
+      console.error(`[fixture:${path.basename(fixtureRoot)}] expected exit code ${expectedStatusCode}`);
+      console.error(`[fixture:${path.basename(fixtureRoot)}] actual exit code ${result.exitCode}`);
+      if (result.stdout) console.error(result.stdout);
+      if (result.stderr) console.error(result.stderr);
+    }
+
+    expect(result.exitCode).toBe(expectedStatusCode);
+  },
+});
+
+export const runBunFixture = (
+  fixtureRoot: string,
+  options: { env?: NodeJS.ProcessEnv; logOutput?: boolean; testArgs?: string[]; timeoutMs?: number } = {},
 ) => {
   const start = performance.now();
   const packageJsonPath = path.join(fixtureRoot, "package.json");
@@ -36,13 +61,17 @@ export const expectBunFixtureToPass = (
       ...packageJson.dependencies,
       ...packageJson.devDependencies,
     });
+    if (packageJson.dependencies?.["bun-test-cloudflare"] || packageJson.devDependencies?.["bun-test-cloudflare"]) {
+      return createBunFixtureResult(fixtureRoot, {
+        durationMs: performance.now() - start,
+        exitCode: 1,
+        stderr: `${packageJsonPath} must not depend on bun-test-cloudflare; fixture tests should resolve the workspace package from the parent test process`,
+        stdout: "",
+      });
+    }
     const hasFileDependency = dependencySpecs.some(
       (specifier) => typeof specifier === "string" && specifier.startsWith("file:"),
     );
-    if (hasFileDependency) {
-      fs.rmSync(path.join(fixtureRoot, "node_modules"), { force: true, recursive: true });
-      fs.rmSync(path.join(fixtureRoot, "bun.lock"), { force: true });
-    }
     const installResult = Bun.spawnSync({
       cmd: hasFileDependency
         ? [process.execPath, "install", "--no-save"]
@@ -54,34 +83,47 @@ export const expectBunFixtureToPass = (
     });
 
     if (installResult.exitCode !== 0) {
-      const stdout = installResult.stdout.toString();
-      const stderr = installResult.stderr.toString();
-      console.error(`[fixture:${path.basename(fixtureRoot)}] bun install failed`);
-      if (stdout) console.error(stdout);
-      if (stderr) console.error(stderr);
+      return createBunFixtureResult(fixtureRoot, {
+        durationMs: performance.now() - start,
+        exitCode: installResult.exitCode,
+        stderr: installResult.stderr.toString(),
+        stdout: installResult.stdout.toString(),
+      });
     }
-    expect(installResult.exitCode).toBe(0);
   }
 
   const fixtureTests = findFixtureTests(fixtureRoot);
-  expect(fixtureTests.length).toBeGreaterThan(0);
+  if (fixtureTests.length === 0) {
+    return createBunFixtureResult(fixtureRoot, {
+      durationMs: performance.now() - start,
+      exitCode: 1,
+      stderr: `No fixture tests found in ${fixtureRoot}`,
+      stdout: "",
+    });
+  }
 
   const result = Bun.spawnSync({
-    cmd: [process.execPath, "test", ...fixtureTests],
+    cmd: [
+      process.execPath,
+      "test",
+      ...(options.testArgs ?? []),
+      ...fixtureTests,
+      ...(options.timeoutMs ? ["--timeout", String(options.timeoutMs)] : []),
+    ],
     cwd: fixtureRoot,
     env: { ...process.env, ...options.env },
     stderr: "pipe",
     stdout: "pipe",
   });
-  const duration = performance.now() - start;
-
+  const durationMs = performance.now() - start;
   const stdout = result.stdout.toString();
   const stderr = result.stderr.toString();
-  if (options.logOutput || result.exitCode !== 0) {
-    console.error(`[fixture:${path.basename(fixtureRoot)}] ${duration.toFixed(1)}ms`);
+
+  if (options.logOutput) {
+    console.error(`[fixture:${path.basename(fixtureRoot)}] ${durationMs.toFixed(1)}ms`);
     if (stdout) console.error(stdout);
     if (stderr) console.error(stderr);
   }
 
-  expect(result.exitCode).toBe(0);
+  return createBunFixtureResult(fixtureRoot, { durationMs, exitCode: result.exitCode, stderr, stdout });
 };

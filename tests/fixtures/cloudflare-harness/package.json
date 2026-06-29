@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "devDependencies": {
-    "bun-test-cloudflare": "file:../../..",
     "typescript": "7.0.1-rc",
     "wrangler": "4.101.0"
   }

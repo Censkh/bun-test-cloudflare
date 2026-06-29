@@ -14,9 +14,10 @@ test("setup exposes ws client and server constructors", () => {
   expect(typeof ws.Server).toBe("function");
 });
 
-test("setup installs a cloudflare:workers DurableObject shim", async () => {
+test("setup installs minimal cloudflare:workers class shims", async () => {
   const moduleName = "cloudflare:workers";
   const workers = await import(moduleName);
 
   expect(typeof workers.DurableObject).toBe("function");
+  expect(typeof workers.WorkerEntrypoint).toBe("function");
 });

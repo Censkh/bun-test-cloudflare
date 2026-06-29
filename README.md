@@ -19,6 +19,10 @@ bun add -d bun-test-cloudflare
 
 For a workspace package, use:
 
+## Wrangler Compatibility
+
+`bun-test-cloudflare` requires `wrangler >= 4.104.0`.
+
 ## Configure Bun
 
 Preload the setup before app-specific test setup:
@@ -70,11 +74,18 @@ export const harness = createCloudflareHarness({
   },
 });
 
-export type TestWorkers = ReturnType<typeof harness.workers>;
+export type TestWorkers = Parameters<Parameters<typeof harness.run>[0]>[0];
 ```
 
 The object keys become the typed worker handles passed to `run()`.
 The optional `bindings` token is type-only metadata for `worker.getEnv()` and is not passed to Wrangler.
+
+When a worker uses `configPath`, `bun-test-cloudflare` reads that Wrangler config, injects
+`define["process.env.NODE_ENV"] = "'test'"`, and runs `wrangler deploy --dry-run --outdir`
+once for that harness. Build output is written to
+`node_modules/.btcf/worker-build/<worker-name>/worker.js`. Test runs then use that script
+with `no_bundle = true`, so Wrangler does not rerun its esbuild bundle step for every
+`run()`.
 
 ## Use In Tests
 
@@ -91,7 +102,25 @@ test("calls the backend worker", async () => {
 });
 ```
 
-`run()` starts the harness before the callback and always closes it afterwards, including when the callback throws.
+`run()` creates a fresh Wrangler test server, starts it before the callback, and always closes it afterwards, including when the callback throws.
+
+## Lifecycle Events
+
+Use `events.beforeRun` for per-run setup after Wrangler has started and before the test callback runs:
+
+```ts
+const harness = createCloudflareHarness({
+  events: {
+    beforeRun: async (workers) => {
+      const env = await workers.BACKEND.getEnv();
+      await env.DB.prepare("SELECT 1").run();
+    },
+  },
+  workers: {
+    BACKEND: { configPath: "./wrangler.toml" },
+  },
+});
+```
 
 ## Worker Names
 
@@ -111,7 +140,7 @@ await harness.run(async (workers) => {
 
 ## Direct Server Access
 
-The wrapped Wrangler server is available when needed:
+The current Wrangler server is available inside `run()` when needed:
 
 ```ts
 await harness.run(async (workers, server) => {
@@ -121,4 +150,21 @@ await harness.run(async (workers, server) => {
 });
 ```
 
-You can also call `harness.listen()`, `harness.workers()`, and `harness.close()` manually for custom lifecycle control.
+## Access The Active Run Context
+
+Code called inside `harness.run()` can read the active workers and server without threading them through every helper:
+
+```ts
+import { getCloudflareHarnessRunContext } from "bun-test-cloudflare";
+
+export async function createFixture() {
+  const { workers } = getCloudflareHarnessRunContext<{
+    BACKEND: { configPath: string; name: string };
+  }>();
+  const env = await workers.BACKEND.getEnv();
+
+  await env.MY_BUCKET.put("fixture.txt", "hello");
+}
+```
+
+The run context is backed by `AsyncLocalStorage`, so it is scoped to the current `harness.run()` callback and async work started from it. Calling `getCloudflareHarnessRunContext()` outside `harness.run()` throws.
