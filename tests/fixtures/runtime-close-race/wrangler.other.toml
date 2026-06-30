@@ -1,0 +1,4 @@
+name = "runtime-close-race-other"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+main = "./src/other.ts"

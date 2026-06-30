@@ -1,0 +1,3 @@
+name = "tiktoken-wasm-fixture"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"

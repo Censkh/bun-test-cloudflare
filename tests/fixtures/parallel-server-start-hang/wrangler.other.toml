@@ -1,0 +1,4 @@
+name = "parallel-server-start-hang-other"
+main = "src/other.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]

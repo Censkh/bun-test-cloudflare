@@ -1,0 +1,8 @@
+name = "runtime-close-race-worker"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+main = "./src/worker.ts"
+
+[[services]]
+binding = "OTHER"
+service = "runtime-close-race-other"

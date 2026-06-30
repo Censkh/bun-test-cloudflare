@@ -1,0 +1,9 @@
+{
+  "name": "parallel-build-once-fixture",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "typescript": "7.0.1-rc",
+    "wrangler": "4.105.0"
+  }
+}
