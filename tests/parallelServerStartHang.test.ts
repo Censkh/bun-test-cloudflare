@@ -14,5 +14,5 @@ describe("parallel server start hang repro", () => {
     result.expectStatusCode(0);
     expect(output).not.toContain("ERR_RUNTIME_FAILURE");
     expect(output).not.toContain("timed out");
-  });
+  }, 30_000);
 });

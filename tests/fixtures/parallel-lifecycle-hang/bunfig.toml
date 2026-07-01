@@ -1,0 +1,2 @@
+[test]
+preload = ["./lifecycleProbe.ts", "bun-test-cloudflare/setup"]

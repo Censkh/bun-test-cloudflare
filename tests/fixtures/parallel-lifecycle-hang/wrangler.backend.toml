@@ -1,0 +1,39 @@
+name = "parallel-lifecycle-hang-backend"
+main = "src/backend.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[services]]
+binding = "CDN"
+service = "parallel-lifecycle-hang-cdn"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "parallel-lifecycle-hang-db"
+database_id = "parallel-lifecycle-hang-db"
+
+[images]
+binding = "IMAGES"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "parallel-lifecycle-hang-kv"
+
+[[r2_buckets]]
+binding = "DOCUMENTS"
+bucket_name = "parallel-lifecycle-hang-documents"
+
+[[queues.producers]]
+binding = "JOB_QUEUE"
+queue = "parallel-lifecycle-hang-queue"
+
+[[durable_objects.bindings]]
+name = "COUNTER"
+class_name = "Counter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Counter"]
+
+[browser]
+binding = "BROWSER"

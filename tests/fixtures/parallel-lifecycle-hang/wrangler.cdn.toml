@@ -1,0 +1,20 @@
+name = "parallel-lifecycle-hang-cdn"
+main = "src/cdn.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "parallel-lifecycle-hang-cdn-db"
+database_id = "parallel-lifecycle-hang-cdn-db"
+
+[images]
+binding = "IMAGES"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "parallel-lifecycle-hang-cdn-kv"
+
+[[r2_buckets]]
+binding = "DOCUMENTS"
+bucket_name = "parallel-lifecycle-hang-cdn-documents"
