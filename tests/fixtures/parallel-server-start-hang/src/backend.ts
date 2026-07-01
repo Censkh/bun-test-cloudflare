@@ -50,7 +50,12 @@ export default {
       return env.OTHER.fetch("https://other.local/");
     }
     if (url.pathname === "/image-info") {
-      const bytes = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"));
+      const bytes = Uint8Array.from(
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      );
       const stream = new Response(bytes).body;
       if (!stream) throw new Error("missing stream");
       return Response.json(await env.IMAGES.info(stream));
@@ -88,14 +93,18 @@ export default {
     if (url.pathname === "/asset" && request.method === "POST") {
       const metadata = await parseMetadata(request);
       const id = crypto.randomUUID();
-      await env.DB.prepare("INSERT INTO items (id, value) VALUES (?, ?)").bind(id, String(metadata.name ?? "asset")).run();
+      await env.DB.prepare("INSERT INTO items (id, value) VALUES (?, ?)")
+        .bind(id, String(metadata.name ?? "asset"))
+        .run();
       await env.DOCUMENTS.put(id, JSON.stringify(metadata));
       await env.KV.put(id, String(metadata.name ?? "asset"));
-      ctx.waitUntil((async () => {
-        await new Promise((resolve) => setTimeout(resolve, 150));
-        await env.JOB_QUEUE.send({ id, metadata });
-        await env.DB.prepare("UPDATE items SET value = ? WHERE id = ?").bind("waitUntil", id).run();
-      })());
+      ctx.waitUntil(
+        (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          await env.JOB_QUEUE.send({ id, metadata });
+          await env.DB.prepare("UPDATE items SET value = ? WHERE id = ?").bind("waitUntil", id).run();
+        })(),
+      );
       const stub = env.COUNTER.get(env.COUNTER.idFromName("fixture"));
       const count = await stub.increment();
       return Response.json({ id, count, metadata });

@@ -43,7 +43,11 @@ export const createClient = () => {
 
   return {
     assets: {
-      async create(options: { content?: { base64: string; type: string }; metadata?: Array<{ name: string; type: string; value: unknown }>; name?: string }) {
+      async create(options: {
+        content?: { base64: string; type: string };
+        metadata?: Array<{ name: string; type: string; value: unknown }>;
+        name?: string;
+      }) {
         if (!options.content) {
           throw new Error("Either file content, URL, or multipart part is required");
         }

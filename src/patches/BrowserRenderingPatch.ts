@@ -9,7 +9,9 @@ const isBrowserRenderingLaunch = (command: string, args?: readonly string[]) => 
     return false;
   }
 
-  return args?.some((arg) => arg.startsWith("--user-data-dir=") && browserRenderingProfilePathPattern.test(arg)) ?? false;
+  return (
+    args?.some((arg) => arg.startsWith("--user-data-dir=") && browserRenderingProfilePathPattern.test(arg)) ?? false
+  );
 };
 
 const trackBrowserLaunch = (child: childProcess.ChildProcess) => {
@@ -56,8 +58,13 @@ export const drainBrowserRenderingLaunches = async () => {
 
 export const installBrowserRenderingPatch = () => {
   const originalSpawn = childProcess.spawn;
-  childProcess.spawn = function bunTestCloudflareSpawn(command: string, args?: readonly string[], options?: childProcess.SpawnOptions) {
-    const child = originalSpawn.call(this, command, args as string[], options);
+  childProcess.spawn = function bunTestCloudflareSpawn(
+    this: unknown,
+    command: string,
+    args?: readonly string[],
+    options?: childProcess.SpawnOptions,
+  ) {
+    const child = originalSpawn.call(this as any, command, args as string[], options as any);
 
     // Miniflare registers Browser Rendering sessions only after Chrome prints
     // the DevTools endpoint. If a test closes the harness while Chrome is still

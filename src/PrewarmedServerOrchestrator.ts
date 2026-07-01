@@ -2,7 +2,7 @@ import { afterAll } from "bun:test";
 import type { HarnessRun } from "./HarnessRun";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
-const WARM_WORKERD_POOL_SIZE = 5;
+export const WARM_WORKERD_POOL_SIZE = 2;
 
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
   readonly #available: Array<Promise<HarnessRun<TWorkers>>> = [];

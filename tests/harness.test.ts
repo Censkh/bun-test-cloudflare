@@ -125,6 +125,7 @@ afterAll(() => {
 });
 
 const { createCloudflareHarness, getCloudflareHarnessRunContext, typeToken } = await import("bun-test-cloudflare");
+const { WARM_WORKERD_POOL_SIZE } = await import("../src/PrewarmedServerOrchestrator");
 
 type Equal<TActual, TExpected> =
   (<T>() => T extends TActual ? 1 : 2) extends <T>() => T extends TExpected ? 1 : 2 ? true : false;
@@ -350,7 +351,7 @@ test("parallel run calls use independent servers", async () => {
   expect(secondServer.closeCalls).toBe(1);
 });
 
-test("prewarms five servers and refills the pool when one is leased", async () => {
+test("prewarms the configured server pool and refills it when one is leased", async () => {
   const serversBefore = createdServers.length;
   const harness = createCloudflareHarness({
     workers: {
@@ -359,21 +360,21 @@ test("prewarms five servers and refills the pool when one is leased", async () =
   });
   const initialWarmServers = createdServers.slice(serversBefore);
 
-  expect(initialWarmServers).toHaveLength(5);
+  expect(initialWarmServers).toHaveLength(WARM_WORKERD_POOL_SIZE);
   expect(initialWarmServers.every((server) => server.listenCalls === 1)).toBe(true);
 
   let leasedServer!: FakeServer;
   await harness.run((_workers, server) => {
     leasedServer = server as unknown as FakeServer;
     expect(initialWarmServers).toContain(leasedServer);
-    expect(createdServers.slice(serversBefore)).toHaveLength(6);
+    expect(createdServers.slice(serversBefore)).toHaveLength(WARM_WORKERD_POOL_SIZE + 1);
     expect(createdServers.at(-1)).not.toBe(leasedServer);
     expect(createdServers.at(-1)?.listenCalls).toBe(1);
   });
 
   const harnessServers = createdServers.slice(serversBefore);
   expect(leasedServer.closeCalls).toBe(1);
-  expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(5);
+  expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(WARM_WORKERD_POOL_SIZE);
 });
 
 test("run context throws outside harness.run", () => {

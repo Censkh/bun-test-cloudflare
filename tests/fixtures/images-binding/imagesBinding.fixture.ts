@@ -96,9 +96,7 @@ const normalizeLikeBackend = async (env: ImagesEnv, bytes: Buffer, mimeType: str
   expect(imageInfo.width).toBe(1);
 
   const byteScale = Math.min(1, Math.sqrt(maxImageUploadBytes / bytes.byteLength) * 0.98);
-  const scaleCandidates = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2].map(
-    (multiplier) => byteScale * multiplier,
-  );
+  const scaleCandidates = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2].map((multiplier) => byteScale * multiplier);
 
   for (const outputMimeType of getOutputCandidates(mimeType)) {
     for (const scale of scaleCandidates) {

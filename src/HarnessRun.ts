@@ -3,14 +3,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { TestHarness, TestHarnessOptions } from "wrangler";
 import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
+import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
-import { drainBrowserRenderingLaunches } from "./patches/BrowserRenderingPatch";
-import { drainMiniflareLoopbackRequests } from "./patches/MiniflareLoopbackPatch";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
   devEnvCaptureContext,
-  drainDevEnvRuntimeMessages,
   platformProxyDispatchContext,
 } from "./wranglerPatches";
 
@@ -165,24 +163,13 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] draining runtime messages");
     }
-    await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
-    await drainMiniflareLoopbackRequests();
+    await drainHarnessRun({
+      devEnvs: this.#capturedDevEnvs,
+      platformProxyDispatches: this.#platformProxyDispatches,
+    });
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
-      console.error("[bun-test-cloudflare] drained runtime messages");
-      console.error("[bun-test-cloudflare] draining platform proxy dispatches");
+      console.error("[bun-test-cloudflare] drained harness run");
     }
-    await this.#platformProxyDispatches.drain();
-    if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
-      console.error("[bun-test-cloudflare] drained platform proxy dispatches");
-    }
-    // Platform proxy dispatch completion can enqueue follow-up runtime work.
-    // Drain runtime messages again before closing the shared Wrangler server.
-    await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
-    await drainMiniflareLoopbackRequests();
-    await drainBrowserRenderingLaunches();
-    await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
-    await drainMiniflareLoopbackRequests();
-    await drainBrowserRenderingLaunches();
     this.#logStream.flush();
     this.#logStream.stop();
     await closeServer(this.#server);

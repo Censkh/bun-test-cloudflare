@@ -3,7 +3,20 @@ import { harness } from "./harness";
 
 const sleep = (durationMs: number) => new Promise((resolve) => setTimeout(resolve, durationMs));
 const fileDelay = 1 * 0;
-const staggerDelays: Record<string, number> = { A: 0, B: 700, C: 50, D: 1100, E: 100, F: 1500, G: 150, H: 1900, I: 200, J: 2300, K: 250, L: 2700 };
+const staggerDelays: Record<string, number> = {
+  A: 0,
+  B: 700,
+  C: 50,
+  D: 1100,
+  E: 100,
+  F: 1500,
+  G: 150,
+  H: 1900,
+  I: 200,
+  J: 2300,
+  K: 250,
+  L: 2700,
+};
 
 for (let index = 0; index < 2; index++) {
   test("parallel lifecycle B " + index, async () => {

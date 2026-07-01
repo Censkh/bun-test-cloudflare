@@ -29,13 +29,13 @@ export const installMiniflareLoopbackPatch = () => {
   }
 
   const originalCreateServer = http.createServer;
-  http.createServer = function bunTestCloudflareCreateServer(...args: any[]) {
+  http.createServer = function bunTestCloudflareCreateServer(this: unknown, ...args: any[]) {
     const listener = args[args.length - 1];
     if (typeof listener !== "function") {
-      return originalCreateServer.apply(this, args as any);
+      return originalCreateServer.apply(this as any, args as any);
     }
 
-    const wrappedListener: typeof listener = (request, response) => {
+    const wrappedListener: typeof listener = (request: http.IncomingMessage, response: http.ServerResponse) => {
       const result = listener(request, response);
       if (isMiniflareInternalLoopbackRequest(request)) {
         trackRequest(result);
@@ -43,7 +43,7 @@ export const installMiniflareLoopbackPatch = () => {
       return result;
     };
 
-    return originalCreateServer.apply(this, [...args.slice(0, -1), wrappedListener] as any);
+    return originalCreateServer.apply(this as any, [...args.slice(0, -1), wrappedListener] as any);
   } as typeof http.createServer;
 
   Object.defineProperty(http.createServer, "__bunTestCloudflareLoopbackPatched", {

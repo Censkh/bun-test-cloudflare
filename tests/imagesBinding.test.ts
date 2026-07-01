@@ -5,7 +5,7 @@ const fixtureRoot = fixturePath(import.meta.dir, "images-binding");
 
 describe("Images binding fixture", () => {
   test("captures backend-like Images binding behavior", () => {
-    const result = runBunFixture(fixtureRoot, { logOutput: true, timeoutMs: 15_000 });
+    const result = runBunFixture(fixtureRoot, { timeoutMs: 15_000 });
     const output = `${result.stdout}\n${result.stderr}`;
 
     result.expectStatusCode(0);

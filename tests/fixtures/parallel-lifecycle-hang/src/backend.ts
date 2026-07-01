@@ -19,7 +19,13 @@ export class Counter extends DurableObject {
   }
 }
 
-const pngBytes = () => Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"));
+const pngBytes = () =>
+  Uint8Array.from(
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    ),
+  );
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {

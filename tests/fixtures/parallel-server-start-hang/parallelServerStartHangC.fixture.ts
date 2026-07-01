@@ -6,7 +6,9 @@ for (let index = 0; index < 12; index++) {
   test("parallel server start C " + index, async () => {
     await harness.run(async (workers) => {
       const env = await workers.BACKEND.getEnv();
-      await env.DB.prepare("INSERT INTO items (id, value) VALUES (?, ?)").bind("C-env-" + index, "env").run();
+      await env.DB.prepare("INSERT INTO items (id, value) VALUES (?, ?)")
+        .bind("C-env-" + index, "env")
+        .run();
 
       const client = createClient();
       if (index % 4 === 0) {
