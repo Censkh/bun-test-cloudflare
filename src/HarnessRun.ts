@@ -5,6 +5,7 @@ import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
 import { drainBrowserRenderingLaunches } from "./patches/BrowserRenderingPatch";
+import { drainMiniflareLoopbackRequests } from "./patches/MiniflareLoopbackPatch";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
@@ -111,11 +112,26 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   readonly #platformProxyDispatches = createAsyncOperationTracker();
   readonly #server: TestHarness;
   readonly #logStream: ReturnType<typeof streamServerLogs>;
+  #cacheStorage: CacheStorage | undefined;
   #closed = false;
+  #startPromise: Promise<void> | undefined;
+  #workers: CloudflareWorkerMap<TWorkers> | undefined;
 
   constructor(private readonly options: HarnessRunOptions<TWorkers>) {
     this.#server = createTestHarness(options.testHarnessOptions);
     this.#logStream = streamServerLogs(this.#server);
+  }
+
+  start() {
+    this.#startPromise ??= (async () => {
+      await devEnvCaptureContext.run(this.#capturedDevEnvs, () => {
+        return this.#server.listen();
+      });
+      this.#cacheStorage = await getCapturedRuntimeCaches(this.#capturedDevEnvs);
+      this.#workers = this.#getWorkers();
+    })();
+
+    return this.#startPromise;
   }
 
   async execute<TResult>(
@@ -125,18 +141,18 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
     try {
       return await platformProxyDispatchContext.run(this.#platformProxyDispatches, async () => {
-        await devEnvCaptureContext.run(this.#capturedDevEnvs, () => {
-          return this.#server.listen();
-        });
-        const cacheStorage = await getCapturedRuntimeCaches(this.#capturedDevEnvs);
-        const workers = this.#getWorkers();
+        await this.start();
+        const workers = this.#workers;
+        if (!workers) {
+          throw new Error("Cloudflare harness run failed to start");
+        }
         const runCallback = () =>
           harnessRunContext.run({ server: this.#server, workers }, async () => {
             await this.options.events?.beforeRun?.(workers, this.#server);
             return callback(workers, this.#server);
           });
 
-        return await (cacheStorage ? runWithCloudflareCaches(cacheStorage, runCallback) : runCallback());
+        return await (this.#cacheStorage ? runWithCloudflareCaches(this.#cacheStorage, runCallback) : runCallback());
       });
     } finally {
       await this.close();
@@ -150,6 +166,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       console.error("[bun-test-cloudflare] draining runtime messages");
     }
     await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
+    await drainMiniflareLoopbackRequests();
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] drained runtime messages");
       console.error("[bun-test-cloudflare] draining platform proxy dispatches");
@@ -161,6 +178,10 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     // Platform proxy dispatch completion can enqueue follow-up runtime work.
     // Drain runtime messages again before closing the shared Wrangler server.
     await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
+    await drainMiniflareLoopbackRequests();
+    await drainBrowserRenderingLaunches();
+    await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
+    await drainMiniflareLoopbackRequests();
     await drainBrowserRenderingLaunches();
     this.#logStream.flush();
     this.#logStream.stop();

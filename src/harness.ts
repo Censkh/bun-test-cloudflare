@@ -20,6 +20,8 @@ import {
   HarnessRun,
   type PreparedWorkerInput,
 } from "./HarnessRun";
+import { PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
+import { InlineServerOrchestrator } from "./ServerOrchestrator";
 import { installWranglerPatches } from "./wranglerPatches";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
@@ -476,15 +478,26 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     ...serverConfig,
     workers: preparedWorkers.map((worker) => worker.input),
   };
+  const createRun = () =>
+    new HarnessRun({
+      events,
+      preparedWorkers,
+      testHarnessOptions,
+      workerEntries,
+    });
+  const orchestrator =
+    process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
+      ? new InlineServerOrchestrator(createRun)
+      : new PrewarmedServerOrchestrator(createRun);
 
   return {
-    run(callback) {
-      return new HarnessRun({
-        events,
-        preparedWorkers,
-        testHarnessOptions,
-        workerEntries,
-      }).execute(callback);
+    async run(callback) {
+      const lease = await orchestrator.acquire();
+      try {
+        return await lease.run.execute(callback);
+      } finally {
+        await lease.release();
+      }
     },
   };
 };

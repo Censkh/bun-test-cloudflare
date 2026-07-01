@@ -24,7 +24,7 @@ export const installChildProcessExtraFdPatch = () => {
       typeof options === "object" &&
       typeof options.fd === "number"
     ) {
-      return Readable.fromWeb(Bun.file(options.fd).stream() as ReadableStream);
+      return Readable.fromWeb(Bun.file(options.fd).stream() as unknown as Parameters<typeof Readable.fromWeb>[0]);
     }
 
     return originalConnect.apply(this, args as any);

@@ -241,16 +241,15 @@ test("run starts the server, passes typed workers, and closes after success", as
     },
   });
 
+  let server!: FakeServer;
   const result = await harness.run((workers, currentServer) => {
-    const server = createdServers.at(-1)!;
-    expect(currentServer as unknown).toBe(server);
+    server = currentServer as unknown as FakeServer;
     expect(workers.BACKEND as unknown).toEqual({ name: "backend-worker" });
     expect(workers.CMS as unknown).toEqual({ name: "cms-worker" });
     return "ok";
   });
 
   expect(result).toBe("ok");
-  const server = createdServers.at(-1)!;
   expect(server.listenCalls).toBe(1);
   expect(server.closeCalls).toBe(1);
 });
@@ -262,13 +261,12 @@ test("run exposes workers and server through async run context", async () => {
     },
   });
 
-  await harness.run(async (workers) => {
-    const server = createdServers.at(-1)!;
+  await harness.run(async (workers, server) => {
     const context = getCloudflareHarnessRunContext<{
       BACKEND: { configPath: string; name: string };
     }>();
 
-    expect(context.server as unknown).toBe(server);
+    expect(context.server as unknown).toBe(server as unknown);
     expect(context.workers.BACKEND as unknown).toEqual(workers.BACKEND as unknown);
 
     await Promise.resolve();
@@ -276,7 +274,7 @@ test("run exposes workers and server through async run context", async () => {
     const asyncContext = getCloudflareHarnessRunContext<{
       BACKEND: { configPath: string; name: string };
     }>();
-    expect(asyncContext.server as unknown).toBe(server);
+    expect(asyncContext.server as unknown).toBe(server as unknown);
   });
 });
 
@@ -323,29 +321,59 @@ test("parallel run calls use independent servers", async () => {
   });
 
   const serversBefore = createdServers.length;
-  const firstRun = harness.run(async () => {
+  let firstServer!: FakeServer;
+  let secondServer!: FakeServer;
+  const firstRun = harness.run(async (_workers, server) => {
+    firstServer = server as unknown as FakeServer;
     await Promise.resolve();
   });
-  const secondRun = harness.run(async () => {
+  const secondRun = harness.run(async (_workers, server) => {
+    secondServer = server as unknown as FakeServer;
     secondRunStarted();
     await secondRunReleasePromise;
   });
 
   await secondRunStartedPromise;
   await firstRun;
-  const runServers = createdServers.slice(serversBefore);
 
   try {
-    expect(runServers).toHaveLength(2);
-    expect(runServers[0].listenCalls).toBe(1);
-    expect(runServers[0].closeCalls).toBe(1);
-    expect(runServers[1].listenCalls).toBe(1);
-    expect(runServers[1].closeCalls).toBe(0);
+    expect(createdServers.length - serversBefore).toBeGreaterThanOrEqual(1);
+    expect(firstServer).not.toBe(secondServer);
+    expect(firstServer.listenCalls).toBe(1);
+    expect(firstServer.closeCalls).toBe(1);
+    expect(secondServer.listenCalls).toBe(1);
+    expect(secondServer.closeCalls).toBe(0);
   } finally {
     releaseSecondRun();
     await secondRun;
   }
-  expect(runServers[1].closeCalls).toBe(1);
+  expect(secondServer.closeCalls).toBe(1);
+});
+
+test("prewarms five servers and refills the pool when one is leased", async () => {
+  const serversBefore = createdServers.length;
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
+    },
+  });
+  const initialWarmServers = createdServers.slice(serversBefore);
+
+  expect(initialWarmServers).toHaveLength(5);
+  expect(initialWarmServers.every((server) => server.listenCalls === 1)).toBe(true);
+
+  let leasedServer!: FakeServer;
+  await harness.run((_workers, server) => {
+    leasedServer = server as unknown as FakeServer;
+    expect(initialWarmServers).toContain(leasedServer);
+    expect(createdServers.slice(serversBefore)).toHaveLength(6);
+    expect(createdServers.at(-1)).not.toBe(leasedServer);
+    expect(createdServers.at(-1)?.listenCalls).toBe(1);
+  });
+
+  const harnessServers = createdServers.slice(serversBefore);
+  expect(leasedServer.closeCalls).toBe(1);
+  expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(5);
 });
 
 test("run context throws outside harness.run", () => {
@@ -389,9 +417,10 @@ test("run tolerates uncloneable worker runtime logs", async () => {
   };
 
   const dataCloneError = new DOMException("The object can not be cloned.", "DataCloneError");
+  let server!: FakeServer;
   try {
-    await harness.run(async () => {
-      const server = createdServers.at(-1)!;
+    await harness.run(async (_workers, currentServer) => {
+      server = currentServer as unknown as FakeServer;
       server.getLogsError = dataCloneError;
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
@@ -399,7 +428,6 @@ test("run tolerates uncloneable worker runtime logs", async () => {
     console.error = originalConsoleError;
   }
 
-  const server = createdServers.at(-1)!;
   expect(server.listenCalls).toBe(1);
   expect(server.closeCalls).toBe(1);
   expect(consoleErrors).toEqual([["[bun-test-cloudflare] Failed reading Worker runtime logs:"], [dataCloneError]]);
@@ -417,10 +445,11 @@ test("run closes the server after callback failure", async () => {
     consoleErrors.push(args);
   };
 
+  let server!: FakeServer;
   try {
     await expect(
-      harness.run(() => {
-        const server = createdServers.at(-1)!;
+      harness.run((_workers, currentServer) => {
+        server = currentServer as unknown as FakeServer;
         server.logs = [{ level: "error", message: "worker failed" }];
         throw new Error("boom");
       }),
@@ -429,7 +458,6 @@ test("run closes the server after callback failure", async () => {
     console.error = originalConsoleError;
   }
 
-  const server = createdServers.at(-1)!;
   expect(server.listenCalls).toBe(1);
   expect(server.closeCalls).toBe(1);
   expect(consoleErrors).toEqual([["worker failed"]]);
