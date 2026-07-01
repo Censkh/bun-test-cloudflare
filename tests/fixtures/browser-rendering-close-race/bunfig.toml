@@ -1,2 +1,3 @@
 [test]
 preload = ["bun-test-cloudflare/setup"]
+parallel = true

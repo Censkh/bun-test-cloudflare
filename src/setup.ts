@@ -1,4 +1,6 @@
 import { installGlobalCachesBridge } from "./CacheBridge";
+import { installBrowserRenderingPatch } from "./patches/BrowserRenderingPatch";
+import { installChildProcessExtraFdPatch } from "./patches/ChildProcessExtraFdPatch";
 import { installCloudflareWorkersPatch } from "./patches/CloudflareWorkersPatch";
 import { installMiniflarePatch } from "./patches/MiniflarePatch";
 import { installMiniflareWebGlobalsPatch } from "./patches/MiniflareWebGlobalsPatch";
@@ -10,10 +12,12 @@ import { installWranglerGuessWorkerFormatPatch } from "./patches/WranglerGuessWo
 
 installWebStreamPatch();
 installGlobalCachesBridge();
+installChildProcessExtraFdPatch();
+installBrowserRenderingPatch();
 installUndiciPatch();
 installWebsocketPatch();
+installWorkerThreadsPatch();
 installMiniflareWebGlobalsPatch();
 installWranglerGuessWorkerFormatPatch();
 installMiniflarePatch();
-installWorkerThreadsPatch();
 installCloudflareWorkersPatch();

@@ -1,8 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 
-const runtimeTeardownGuardSymbol = Symbol("bunTestCloudflareRuntimeTeardownGuard");
-
 export type CapturedDevEnv = {
   config?: {
     latestConfig?: {
@@ -14,12 +12,7 @@ export type CapturedDevEnv = {
       drained?: () => Promise<void>;
     };
   };
-  runtimes?: RuntimeController[];
-};
-
-type RuntimeController = {
-  teardown?: () => Promise<void>;
-  [runtimeTeardownGuardSymbol]?: true;
+  runtimes?: unknown[];
 };
 
 export type AsyncOperationTracker = {
@@ -52,27 +45,6 @@ export const createAsyncOperationTracker = (): AsyncOperationTracker => {
       return promise;
     },
   };
-};
-
-const runtimeTeardowns = new WeakMap<RuntimeController, Promise<void>>();
-
-export const installRuntimeTeardownGuard = (runtime: RuntimeController) => {
-  if (!runtime.teardown || runtime[runtimeTeardownGuardSymbol]) {
-    return;
-  }
-
-  const originalTeardown = runtime.teardown.bind(runtime);
-  runtime.teardown = () => {
-    const existingTeardown = runtimeTeardowns.get(runtime);
-    if (existingTeardown) {
-      return existingTeardown;
-    }
-
-    const teardown = originalTeardown();
-    runtimeTeardowns.set(runtime, teardown);
-    return teardown;
-  };
-  runtime[runtimeTeardownGuardSymbol] = true;
 };
 
 const isPlatformProxyFetch = (input: unknown) => {
@@ -129,7 +101,6 @@ const installDevEnvCapture = () => {
     wranglerModule.unstable_DevEnv = class BunTestCloudflareCapturedDevEnv extends OriginalDevEnv {
       constructor(...args: any[]) {
         super(...args);
-        this.runtimes?.forEach(installRuntimeTeardownGuard);
         devEnvCaptureContext.getStore()?.push(this);
       }
     };

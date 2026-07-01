@@ -2,8 +2,6 @@ import { expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import {
   createAsyncOperationTracker,
-  installRuntimeTeardownGuard,
-  installWranglerPatches,
   platformProxyDispatchContext,
   trackPlatformProxyDispatch,
 } from "../src/wranglerPatches";
@@ -11,7 +9,6 @@ import {
 const require = createRequire(import.meta.url);
 
 test("tracks platform proxy dispatches until they finish", async () => {
-  installWranglerPatches();
   const undici = require("undici") as { fetch: typeof fetch };
   const lifecycleEvents: string[] = [];
   let releaseBody!: () => void;
@@ -66,31 +63,4 @@ test("tracks platform proxy dispatches until they finish", async () => {
   } finally {
     await server.stop(true);
   }
-});
-
-test("guards shared Wrangler runtime teardown", async () => {
-  let teardownCalls = 0;
-  let releaseTeardown!: () => void;
-  const teardownReleased = new Promise<void>((resolve) => {
-    releaseTeardown = resolve;
-  });
-  const runtime = {
-    async teardown() {
-      teardownCalls++;
-      await teardownReleased;
-    },
-  };
-
-  installRuntimeTeardownGuard(runtime);
-  installRuntimeTeardownGuard(runtime);
-
-  const firstTeardown = runtime.teardown();
-  const secondTeardown = runtime.teardown();
-
-  expect(teardownCalls).toBe(1);
-  expect(secondTeardown).toBe(firstTeardown);
-
-  releaseTeardown();
-  await Promise.all([firstTeardown, secondTeardown]);
-  expect(teardownCalls).toBe(1);
 });

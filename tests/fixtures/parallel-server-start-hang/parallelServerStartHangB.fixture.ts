@@ -2,6 +2,18 @@ import { expect, test } from "bun:test";
 import { createClient } from "./client";
 import { harness } from "./harness";
 
+const minMultipartPartBytes = 5 * 1024 * 1024;
+
+const runMultipartFlow = async () => {
+  const firstPart = Buffer.alloc(minMultipartPartBytes, 1);
+  const finalPart = Buffer.from([2, 3, 4]);
+  const client = createClient();
+  await expect(client.assets.multipartComplete(firstPart, finalPart)).resolves.toMatchObject({
+    bytes: minMultipartPartBytes + finalPart.length,
+    receivedParts: 2,
+  });
+};
+
 for (let index = 0; index < 12; index++) {
   test("parallel server start B " + index, async () => {
     await harness.run(async (workers) => {
@@ -34,6 +46,10 @@ for (let index = 0; index < 12; index++) {
 
       const serviceResponse = await workers.BACKEND.fetch("https://example.com/other");
       expect(await serviceResponse.json()).toEqual({ other: true });
+
+      if (index >= 9) {
+        await runMultipartFlow();
+      }
     });
   });
 }

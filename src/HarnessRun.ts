@@ -1,11 +1,10 @@
 import { onTestFinished } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import path from "node:path";
 import type { TestHarness, TestHarnessOptions } from "wrangler";
 import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
+import { drainBrowserRenderingLaunches } from "./patches/BrowserRenderingPatch";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
@@ -36,112 +35,6 @@ type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> 
 };
 
 const harnessRunContext = new AsyncLocalStorage<CloudflareHarnessRunContext<any>>();
-
-const sleep = (durationMs: number) => new Promise((resolve) => setTimeout(resolve, durationMs));
-const serverLifecycleLockTimeoutMs = 60_000;
-
-const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => error instanceof Error && "code" in error;
-
-const isProcessAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-type ServerLifecycleLockOwner = {
-  operation: string;
-  pid: number;
-  startedAt: number;
-};
-
-const serverLifecycleDir = () => path.join(process.cwd(), "node_modules/.btcf/server-lifecycle");
-const serverLifecycleLockPath = (filename: string) => path.join(serverLifecycleDir(), filename);
-
-const readServerLifecycleLockOwner = (lockPath: string): ServerLifecycleLockOwner | undefined => {
-  try {
-    return JSON.parse(readFileSync(lockPath, "utf8")) as ServerLifecycleLockOwner;
-  } catch {
-    return undefined;
-  }
-};
-
-const removeDeadServerLifecycleLock = (lockPath: string) => {
-  const owner = readServerLifecycleLockOwner(lockPath);
-  if (!owner) return;
-
-  if (isProcessAlive(owner.pid)) return;
-
-  try {
-    unlinkSync(lockPath);
-  } catch (error) {
-    if (!isErrnoException(error) || error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-};
-
-const releaseServerLifecycleLock = (lockPath: string) => {
-  try {
-    unlinkSync(lockPath);
-  } catch (error) {
-    if (!isErrnoException(error) || error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-};
-
-const acquireServerLifecycleLock = async (filename: string, operation: string) => {
-  const lockPath = serverLifecycleLockPath(filename);
-  mkdirSync(serverLifecycleDir(), { recursive: true });
-  const start = Date.now();
-
-  while (Date.now() - start <= serverLifecycleLockTimeoutMs) {
-    try {
-      const lockFile = openSync(lockPath, "wx");
-      writeFileSync(lockFile, JSON.stringify({ operation, pid: process.pid, startedAt: Date.now() }));
-      closeSync(lockFile);
-      return () => releaseServerLifecycleLock(lockPath);
-    } catch (error) {
-      if (!isErrnoException(error) || error.code !== "EEXIST") {
-        throw error;
-      }
-      removeDeadServerLifecycleLock(lockPath);
-      await sleep(25);
-    }
-  }
-
-  const owner = readServerLifecycleLockOwner(lockPath);
-  throw new Error(
-    `Timed out waiting for Wrangler server lifecycle lock: ${lockPath}${
-      owner ? ` owned by pid ${owner.pid} (${owner.operation})` : ""
-    }`,
-  );
-};
-
-const runWithServerLifecycle = async <TResult>(
-  operation: "close" | "listen",
-  callback: () => Promise<TResult> | TResult,
-) => {
-  // Miniflare starts workerd through child-process stdio/control pipes. Under
-  // Bun's parallel test workers, overlapping starts and closes can break a
-  // different workerd's startup pipe, so this gate must be filesystem-backed
-  // rather than process-local.
-  const release = await acquireServerLifecycleLock("lifecycle.lock", operation);
-  try {
-    return await callback();
-  } finally {
-    release();
-  }
-};
-
-const runWithServerListen = async <TResult>(callback: () => Promise<TResult> | TResult) =>
-  runWithServerLifecycle("listen", callback);
-
-const runWithServerClose = async <TResult>(callback: () => Promise<TResult> | TResult) =>
-  runWithServerLifecycle("close", callback);
 
 export const getCloudflareHarnessRunContext = <const TWorkers extends Record<string, CloudflareWorkerConfig>>() => {
   const context = harnessRunContext.getStore();
@@ -204,11 +97,6 @@ const closeServer = async (server: TestHarness) => {
       console.error("[bun-test-cloudflare] closing Wrangler test server");
     }
     await server.close();
-    const bunRuntime = (globalThis as typeof globalThis & { Bun?: { gc?: (force?: boolean) => void } }).Bun;
-    // Bun can retain Miniflare platform-proxy resources after close; forcing
-    // collection prevents those stale resources affecting the next harness run.
-    bunRuntime?.gc?.(true);
-
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] closed Wrangler test server");
     }
@@ -238,7 +126,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     try {
       return await platformProxyDispatchContext.run(this.#platformProxyDispatches, async () => {
         await devEnvCaptureContext.run(this.#capturedDevEnvs, () => {
-          return runWithServerListen(() => this.#server.listen());
+          return this.#server.listen();
         });
         const cacheStorage = await getCapturedRuntimeCaches(this.#capturedDevEnvs);
         const workers = this.#getWorkers();
@@ -273,9 +161,10 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     // Platform proxy dispatch completion can enqueue follow-up runtime work.
     // Drain runtime messages again before closing the shared Wrangler server.
     await drainDevEnvRuntimeMessages(this.#capturedDevEnvs);
+    await drainBrowserRenderingLaunches();
     this.#logStream.flush();
     this.#logStream.stop();
-    await runWithServerClose(() => closeServer(this.#server));
+    await closeServer(this.#server);
   }
 
   #getWorkers() {

@@ -1,0 +1,7 @@
+name = "browser-rendering-close-race-worker"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+main = "./src/worker.ts"
+
+[browser]
+binding = "BROWSER"
