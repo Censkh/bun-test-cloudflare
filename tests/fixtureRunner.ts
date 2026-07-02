@@ -51,7 +51,13 @@ const createBunFixtureResult = (
 
 export const runBunFixture = (
   fixtureRoot: string,
-  options: { env?: NodeJS.ProcessEnv; logOutput?: boolean; testArgs?: string[]; timeoutMs?: number } = {},
+  options: {
+    env?: NodeJS.ProcessEnv;
+    installMode?: "full" | "lockfile";
+    logOutput?: boolean;
+    testArgs?: string[];
+    timeoutMs?: number;
+  } = {},
 ) => {
   const start = performance.now();
   const packageJsonPath = path.join(fixtureRoot, "package.json");
@@ -72,8 +78,9 @@ export const runBunFixture = (
     const hasFileDependency = dependencySpecs.some(
       (specifier) => typeof specifier === "string" && specifier.startsWith("file:"),
     );
+    const shouldInstallNodeModules = options.installMode === "full" || hasFileDependency;
     const installResult = Bun.spawnSync({
-      cmd: hasFileDependency
+      cmd: shouldInstallNodeModules
         ? [process.execPath, "install", "--no-save"]
         : [process.execPath, "install", "--no-save", "--lockfile-only"],
       cwd: fixtureRoot,

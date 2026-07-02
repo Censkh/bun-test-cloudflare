@@ -5,7 +5,7 @@ const fixtureRoot = fixturePath(import.meta.dir, "tiktoken-wasm");
 
 describe("Tiktoken wasm fixture", () => {
   test("passes in its own Bun test process", () => {
-    const result = runBunFixture(fixtureRoot);
+    const result = runBunFixture(fixtureRoot, { installMode: "full" });
     result.expectStatusCode(0);
   }, 15_000);
 });

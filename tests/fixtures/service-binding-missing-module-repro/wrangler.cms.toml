@@ -1,0 +1,9 @@
+name = "missing-module-cms"
+main = "cms.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+find_additional_modules = true
+
+[[rules]]
+type = "ESModule"
+globs = ["node_modules/payload/dist/uploads/isImage.js"]

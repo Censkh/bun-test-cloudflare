@@ -1,0 +1,9 @@
+{
+  "name": "undici-7-fixture",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "undici": "7.28.0",
+    "wrangler": "4.105.0"
+  }
+}

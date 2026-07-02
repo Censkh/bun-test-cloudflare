@@ -1,0 +1,8 @@
+name = "missing-module-backend"
+main = "backend.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[services]]
+binding = "CMS"
+service = "missing-module-cms"

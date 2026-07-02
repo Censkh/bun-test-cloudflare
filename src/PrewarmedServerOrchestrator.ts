@@ -1,8 +1,39 @@
-import { afterAll } from "bun:test";
 import type { HarnessRun } from "./HarnessRun";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
 export const WARM_WORKERD_POOL_SIZE = 2;
+
+type PrewarmedServerOrchestratorRegistry = {
+  closing: boolean;
+  installed: boolean;
+  orchestrators: Set<PrewarmedServerOrchestrator<any>>;
+};
+
+declare global {
+  var __bunTestCloudflarePrewarmedServerOrchestrators: PrewarmedServerOrchestratorRegistry | undefined;
+}
+
+const getPrewarmedServerOrchestratorRegistry = () => {
+  const registry = (globalThis.__bunTestCloudflarePrewarmedServerOrchestrators ??= {
+    closing: false,
+    installed: false,
+    orchestrators: new Set<PrewarmedServerOrchestrator<any>>(),
+  });
+
+  if (!registry.installed) {
+    registry.installed = true;
+    process.once("beforeExit", async () => {
+      if (registry.closing) {
+        return;
+      }
+
+      registry.closing = true;
+      await Promise.allSettled(Array.from(registry.orchestrators, (orchestrator) => orchestrator.close()));
+    });
+  }
+
+  return registry;
+};
 
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
   readonly #available: Array<Promise<HarnessRun<TWorkers>>> = [];
@@ -10,10 +41,8 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   #closed = false;
 
   constructor(private readonly createRun: () => HarnessRun<TWorkers>) {
+    getPrewarmedServerOrchestratorRegistry().orchestrators.add(this);
     this.#fillWarmPool();
-    try {
-      afterAll(() => this.close());
-    } catch {}
   }
 
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
@@ -42,6 +71,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   }
 
   async close() {
+    getPrewarmedServerOrchestratorRegistry().orchestrators.delete(this);
     this.#closed = true;
     const availableRuns = await Promise.allSettled(this.#available);
     this.#available.length = 0;

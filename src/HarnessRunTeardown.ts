@@ -19,4 +19,6 @@ export const drainHarnessRun = async ({ devEnvs, platformProxyDispatches }: Drai
   await drainMiniflareLoopbackRequests();
   await drainBrowserRenderingLaunches();
   await drainDevEnvRuntimeMessages(devEnvs);
+  await drainMiniflareLoopbackRequests();
+  await drainBrowserRenderingLaunches();
 };

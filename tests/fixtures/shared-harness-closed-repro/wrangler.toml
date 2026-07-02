@@ -1,0 +1,4 @@
+name = "shared-harness-closed-repro"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]

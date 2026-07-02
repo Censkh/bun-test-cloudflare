@@ -6,6 +6,7 @@ const fixtureRoot = fixturePath(import.meta.dir, "browser-rendering-close-race")
 describe("Browser Rendering close race", () => {
   test("does not remove Browser Rendering profile directories while launches are in flight", () => {
     const result = runBunFixture(fixtureRoot, {
+      installMode: "full",
       testArgs: ["--parallel=4", "--parallel-delay=0"],
       timeoutMs: 20_000,
     });

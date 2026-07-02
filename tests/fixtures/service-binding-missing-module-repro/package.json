@@ -1,9 +1,9 @@
 {
-  "name": "browser-rendering-close-race-fixture",
+  "name": "service-binding-missing-module-repro-fixture",
   "private": true,
   "type": "module",
   "devDependencies": {
-    "@cloudflare/puppeteer": "^1.1.0",
+    "payload": "3.85.1",
     "typescript": "7.0.1-rc",
     "wrangler": "4.105.0"
   }
