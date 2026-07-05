@@ -326,9 +326,12 @@ const isAdditionalModuleRule = (rule: Record<string, any>) =>
   Array.isArray(rule.globs) &&
   rule.globs.every((glob) => typeof glob === "string");
 
+const isHarnessInternalPath = (filePath: string) => filePath.split(path.sep).includes(".btcf");
+
 const copyAdditionalModules = (plan: WorkerBuildPlan) => {
   const rules = Array.isArray(plan.config.rules) ? plan.config.rules.filter(isAdditionalModuleRule) : [];
   const copiedRelativePaths = new Set<string>();
+  const resolvedOutdir = path.resolve(plan.outdir);
 
   for (const rule of rules) {
     for (const glob of rule.globs as string[]) {
@@ -339,11 +342,18 @@ const copyAdditionalModules = (plan: WorkerBuildPlan) => {
       const matcher = new Bun.Glob(glob);
       for (const sourceRoot of plan.additionalModuleSourceRoots) {
         for (const relativePath of matcher.scanSync({ cwd: sourceRoot, dot: true, onlyFiles: true })) {
+          const sourcePath = path.resolve(sourceRoot, relativePath);
+          if (
+            isHarnessInternalPath(relativePath) ||
+            sourcePath === resolvedOutdir ||
+            sourcePath.startsWith(`${resolvedOutdir}${path.sep}`)
+          ) {
+            continue;
+          }
           if (copiedRelativePaths.has(relativePath)) {
             continue;
           }
 
-          const sourcePath = path.join(sourceRoot, relativePath);
           const destinationPath = path.join(plan.outdir, relativePath);
           mkdirSync(path.dirname(destinationPath), { recursive: true });
           copyFileSync(sourcePath, destinationPath);

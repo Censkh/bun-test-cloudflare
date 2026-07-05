@@ -181,6 +181,6 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
         const handle = this.#server.getWorker(worker.name ?? String(key));
         return [key, handle];
       }),
-    ) as CloudflareWorkerMap<TWorkers>;
+    ) as unknown as CloudflareWorkerMap<TWorkers>;
   }
 }
