@@ -354,26 +354,6 @@ const copyAdditionalModules = (plan: WorkerBuildPlan) => {
   }
 };
 
-const shouldBuildWorker = (plan: WorkerBuildPlan) => {
-  if (!isWorkerBuildOwner()) {
-    return false;
-  }
-
-  return withBuildLock(plan.outdir, () => {
-    const existingStatus = readBuildStatus(plan.statusPath);
-    if (existingStatus?.buildKey !== plan.buildKey) {
-      return true;
-    }
-    if (existingStatus.state === "success" && existsSync(existingStatus.builtMain)) {
-      return false;
-    }
-    if (existingStatus.state === "failure") {
-      throwBuildFailure(existingStatus);
-    }
-    return true;
-  });
-};
-
 const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   if (!isWorkerBuildOwner()) {
     return waitForWorkerBuild(plan.statusPath, plan.buildKey, plan.outdir);
@@ -530,40 +510,9 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
 ): CloudflareHarness<TWorkers> => {
   const { events, workers: workerConfigs, ...serverConfig } = config;
   const workerEntries = Object.entries(workerConfigs) as Array<[keyof TWorkers, CloudflareWorkerConfig]>;
-  const buildPlans = workerEntries.map(([key, worker]) => {
-    const { bindings: _bindings, name: _name, ...input } = worker;
-    const env = "env" in input ? input.env : undefined;
-    const { additionalModuleSourceRoots, config, outdir } = resolveWorkerConfig(
-      input,
-      serverConfig.root,
-      worker.name ?? String(key),
-    );
-    const workerName = worker.name ?? config.name ?? String(key);
-    return createWorkerBuildPlan(
-      workerName,
-      outdir,
-      withTestEnvironmentDefine(config),
-      config,
-      env,
-      additionalModuleSourceRoots,
-    );
-  });
-  const workersToBuild = buildPlans.filter(shouldBuildWorker);
-  if (workersToBuild.length > 0) {
-    console.info(`[bun-test-cloudflare] Building ${workersToBuild.length} worker(s)`);
-  }
   const preparedWorkers = workerEntries.map(([key, worker]) =>
     prepareWorkerInput(String(key), worker, serverConfig.root),
   );
-  const builtWorkers = preparedWorkers.filter((worker) => worker.built);
-  if (builtWorkers.length > 0) {
-    console.info(
-      [
-        "[bun-test-cloudflare] Built workers:",
-        ...builtWorkers.map((worker) => `- ${worker.name} (${worker.durationMs.toFixed(1)}ms)`),
-      ].join("\n"),
-    );
-  }
 
   const testHarnessOptions = {
     ...serverConfig,
