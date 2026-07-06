@@ -35,6 +35,17 @@ const getPrewarmedServerOrchestratorRegistry = () => {
   return registry;
 };
 
+export const closePrewarmedServerOrchestrators = async () => {
+  const registry = globalThis.__bunTestCloudflarePrewarmedServerOrchestrators;
+  if (!registry || registry.closing) {
+    return;
+  }
+
+  registry.closing = true;
+  await Promise.allSettled(Array.from(registry.orchestrators, (orchestrator) => orchestrator.close()));
+  registry.closing = false;
+};
+
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
   readonly #available: Array<Promise<HarnessRun<TWorkers>>> = [];
   readonly #inUse = new Set<HarnessRun<TWorkers>>();

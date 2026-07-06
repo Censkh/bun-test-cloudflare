@@ -1,6 +1,5 @@
 import http from "node:http";
-
-const pendingLoopbackRequests = new Set<Promise<void>>();
+import { trackBrowserRenderingLaunchRequest } from "./BrowserRenderingPatch";
 
 const isMiniflareInternalLoopbackRequest = (request: http.IncomingMessage) => {
   try {
@@ -11,17 +10,7 @@ const isMiniflareInternalLoopbackRequest = (request: http.IncomingMessage) => {
   }
 };
 
-const trackRequest = (result: unknown) => {
-  const request = Promise.resolve(result).then(() => undefined);
-  pendingLoopbackRequests.add(request);
-  request.finally(() => pendingLoopbackRequests.delete(request)).catch(() => {});
-};
-
-export const drainMiniflareLoopbackRequests = async () => {
-  while (pendingLoopbackRequests.size > 0) {
-    await Promise.allSettled([...pendingLoopbackRequests]);
-  }
-};
+export const drainMiniflareLoopbackRequests = async () => {};
 
 export const installMiniflareLoopbackPatch = () => {
   if ((http.createServer as any).__bunTestCloudflareLoopbackPatched) {
@@ -36,11 +25,10 @@ export const installMiniflareLoopbackPatch = () => {
     }
 
     const wrappedListener: typeof listener = (request: http.IncomingMessage, response: http.ServerResponse) => {
-      const result = listener(request, response);
       if (isMiniflareInternalLoopbackRequest(request)) {
-        trackRequest(result);
+        trackBrowserRenderingLaunchRequest(response);
       }
-      return result;
+      return listener(request, response);
     };
 
     return originalCreateServer.apply(this as any, [...args.slice(0, -1), wrappedListener] as any);

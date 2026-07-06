@@ -125,7 +125,9 @@ afterAll(() => {
 });
 
 const { createCloudflareHarness, getCloudflareHarnessRunContext, typeToken } = await import("bun-test-cloudflare");
-const { WARM_WORKERD_POOL_SIZE } = await import("../src/PrewarmedServerOrchestrator");
+const { closePrewarmedServerOrchestrators, WARM_WORKERD_POOL_SIZE } = await import(
+  "../src/PrewarmedServerOrchestrator"
+);
 
 type Equal<TActual, TExpected> =
   (<T>() => T extends TActual ? 1 : 2) extends <T>() => T extends TExpected ? 1 : 2 ? true : false;
@@ -375,6 +377,9 @@ test("prewarms the configured server pool and refills it when one is leased", as
   const harnessServers = createdServers.slice(serversBefore);
   expect(leasedServer.closeCalls).toBe(1);
   expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(WARM_WORKERD_POOL_SIZE);
+
+  await closePrewarmedServerOrchestrators();
+  expect(harnessServers.every((server) => server.closeCalls === 1)).toBe(true);
 });
 
 test("run context throws outside harness.run", () => {

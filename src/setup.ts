@@ -1,4 +1,6 @@
+import { afterAll } from "bun:test";
 import { installGlobalCachesBridge } from "./CacheBridge";
+import { closePrewarmedServerOrchestrators } from "./PrewarmedServerOrchestrator";
 import { installBrowserRenderingPatch } from "./patches/BrowserRenderingPatch";
 import { installChildProcessExtraFdPatch } from "./patches/ChildProcessExtraFdPatch";
 import { installCloudflareWorkersPatch } from "./patches/CloudflareWorkersPatch";
@@ -23,3 +25,7 @@ installWranglerGuessWorkerFormatPatch();
 installMiniflareLoopbackPatch();
 installMiniflarePatch();
 installCloudflareWorkersPatch();
+
+afterAll(async () => {
+  await closePrewarmedServerOrchestrators();
+});
