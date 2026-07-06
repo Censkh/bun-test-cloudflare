@@ -19,17 +19,17 @@ const staggerDelays: Record<string, number> = {
 };
 
 for (let index = 0; index < 2; index++) {
-  test("parallel lifecycle A " + index, async () => {
+  test(`parallel lifecycle A ${index}`, async () => {
     await harness.run(async (workers) => {
       const formData = new FormData();
-      formData.set("value", "A-" + index);
+      formData.set("value", `A-${index}`);
 
-      const createResponse = await workers.BACKEND.fetch("https://backend.local/multipart?id=A-" + index, {
+      const createResponse = await workers.BACKEND.fetch(`https://backend.local/multipart?id=A-${index}`, {
         method: "POST",
         body: formData,
       });
       expect(createResponse.status).toBe(200);
-      expect(await createResponse.json()).toMatchObject({ value: "A-" + index });
+      expect(await createResponse.json()).toMatchObject({ value: `A-${index}` });
 
       if (index % 3 === 0) {
         const imageResponse = await workers.BACKEND.fetch("https://backend.local/image-info");
@@ -37,12 +37,12 @@ for (let index = 0; index < 2; index++) {
       }
 
       if (index % 2 === 0) {
-        const cdnResponse = await workers.BACKEND.fetch("https://backend.local/cdn?id=A-" + index);
+        const cdnResponse = await workers.BACKEND.fetch(`https://backend.local/cdn?id=A-${index}`);
         expect(await cdnResponse.json()).toMatchObject({ ok: true });
       }
 
       if (index === 0) {
-        await sleep(staggerDelays["A"] ?? fileDelay);
+        await sleep(staggerDelays.A ?? fileDelay);
       }
     });
   });

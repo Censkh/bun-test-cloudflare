@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/bun-test-cloudflare.svg)](https://www.npmjs.com/package/bun-test-cloudflare)
 
-Bun test compatibility and a typed harness wrapper for Cloudflare Workers projects that use Wrangler's `createTestHarness`.
+Bun test support and a typed harness wrapper for Cloudflare Workers projects, with runtime compatibility patches for running Wrangler test servers under Bun.
 
 ## What It Provides
 
