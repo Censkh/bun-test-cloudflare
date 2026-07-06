@@ -3,12 +3,10 @@ import { createClient } from "./client";
 import { harness } from "./harness";
 
 for (let index = 0; index < 12; index++) {
-  test("parallel server start F " + index, async () => {
+  test(`parallel server start F ${index}`, async () => {
     await harness.run(async (workers) => {
       const env = await workers.BACKEND.getEnv();
-      await env.DB.prepare("INSERT INTO items (id, value) VALUES (?, ?)")
-        .bind("F-env-" + index, "env")
-        .run();
+      await env.DB.prepare("INSERT INTO items (id, value) VALUES (?, ?)").bind(`F-env-${index}`, "env").run();
 
       const client = createClient();
       if (index % 4 === 0) {
@@ -17,7 +15,7 @@ for (let index = 0; index < 12; index++) {
         await expect(client.assets.create({ content: { base64: "abc", type: "image/png" } })).rejects.toThrow();
       } else {
         const asset = await client.assets.create({
-          name: "asset-F-" + index,
+          name: `asset-F-${index}`,
           metadata: [
             { name: "score", type: "number", value: "0.98" },
             { name: "published", type: "boolean", value: "true" },
