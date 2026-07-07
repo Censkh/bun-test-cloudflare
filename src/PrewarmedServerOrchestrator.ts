@@ -9,6 +9,11 @@ type PrewarmedServerOrchestratorRegistry = {
   orchestrators: Set<PrewarmedServerOrchestrator<any>>;
 };
 
+type WarmHarnessRun<TWorkers extends Record<string, any>> = {
+  run: HarnessRun<TWorkers>;
+  started: Promise<HarnessRun<TWorkers>>;
+};
+
 declare global {
   var __bunTestCloudflarePrewarmedServerOrchestrators: PrewarmedServerOrchestratorRegistry | undefined;
 }
@@ -47,7 +52,7 @@ export const closePrewarmedServerOrchestrators = async () => {
 };
 
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
-  readonly #available: Array<Promise<HarnessRun<TWorkers>>> = [];
+  readonly #available: Array<WarmHarnessRun<TWorkers>> = [];
   readonly #inUse = new Set<HarnessRun<TWorkers>>();
   #closed = false;
 
@@ -59,10 +64,10 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
 
-    const runPromise = this.#available.shift() ?? this.#createStartedRun();
+    const warmRun = this.#available.shift() ?? this.#createStartedRun();
     this.#fillWarmPool();
 
-    const run = await runPromise;
+    const run = await warmRun.started;
     if (this.#closed) {
       await run.close();
       throw new Error("Cloudflare server orchestrator is closed");
@@ -84,11 +89,11 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   async close() {
     getPrewarmedServerOrchestratorRegistry().orchestrators.delete(this);
     this.#closed = true;
-    const availableRuns = await Promise.allSettled(this.#available);
+    const availableRuns = this.#available.splice(0);
     this.#available.length = 0;
 
     await Promise.allSettled([
-      ...availableRuns.map((result) => (result.status === "fulfilled" ? result.value.close() : undefined)),
+      ...availableRuns.map(({ run }) => run.close()),
       ...Array.from(this.#inUse, (run) => run.close()),
     ]);
     this.#inUse.clear();
@@ -110,7 +115,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       },
     );
     started.catch(() => {});
-    return started;
+    return { run, started };
   }
 
   #fillWarmPool() {
