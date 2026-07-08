@@ -1,16 +1,41 @@
 import http from "node:http";
 import { trackBrowserRenderingLaunchRequest } from "./BrowserRenderingPatch";
 
-const isMiniflareInternalLoopbackRequest = (request: http.IncomingMessage) => {
+const pendingLoopbackRequests = new Set<Promise<void>>();
+
+const getMiniflareInternalLoopbackPathname = (request: http.IncomingMessage) => {
   try {
-    const pathname = new URL(request.url ?? "", "http://localhost").pathname;
-    return pathname === "/browser/launch";
+    return new URL(request.url ?? "", "http://localhost").pathname;
   } catch {
-    return false;
+    return undefined;
   }
 };
 
-export const drainMiniflareLoopbackRequests = async () => {};
+const trackLoopbackResponse = (response: http.ServerResponse) => {
+  let settled = false;
+  let settle!: () => void;
+  const request = new Promise<void>((resolve) => {
+    settle = () => {
+      if (settled) return;
+      settled = true;
+      response.off("close", settle);
+      response.off("finish", settle);
+      resolve();
+    };
+
+    response.once("close", settle);
+    response.once("finish", settle);
+  });
+
+  pendingLoopbackRequests.add(request);
+  request.finally(() => pendingLoopbackRequests.delete(request)).catch(() => {});
+};
+
+export const drainMiniflareLoopbackRequests = async () => {
+  while (pendingLoopbackRequests.size > 0) {
+    await Promise.allSettled([...pendingLoopbackRequests]);
+  }
+};
 
 export const installMiniflareLoopbackPatch = () => {
   if ((http.createServer as any).__bunTestCloudflareLoopbackPatched) {
@@ -25,8 +50,14 @@ export const installMiniflareLoopbackPatch = () => {
     }
 
     const wrappedListener: typeof listener = (request: http.IncomingMessage, response: http.ServerResponse) => {
-      if (isMiniflareInternalLoopbackRequest(request)) {
+      const pathname = getMiniflareInternalLoopbackPathname(request);
+      if (pathname === "/browser/launch") {
         trackBrowserRenderingLaunchRequest(response);
+      } else if (pathname === "/browser/close") {
+        // Miniflare's Browser Rendering binding fires this loopback fetch without
+        // awaiting it. Draining the response avoids closing the harness while
+        // Miniflare still has the browser session registered.
+        trackLoopbackResponse(response);
       }
       return listener(request, response);
     };

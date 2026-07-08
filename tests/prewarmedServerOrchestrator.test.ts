@@ -1,25 +1,36 @@
 import { expect, test } from "bun:test";
 import { PrewarmedServerOrchestrator, WARM_WORKERD_POOL_SIZE } from "../src/PrewarmedServerOrchestrator";
 
-test("prewarmed server cleanup closes runs that are still starting", async () => {
-  const closedRuns: number[] = [];
+test("prewarmed server cleanup waits for starting runs before closing them", async () => {
+  const events: string[] = [];
   let createdRuns = 0;
-  const neverStarted = new Promise<void>(() => {});
+  let resolveStarts: (() => void) | undefined;
+  const starts = new Promise<void>((resolve) => {
+    resolveStarts = resolve;
+  });
   const orchestrator = new PrewarmedServerOrchestrator<any>(() => {
     const runId = createdRuns++;
     return {
       close: async () => {
-        closedRuns.push(runId);
+        events.push(`closed:${runId}`);
       },
-      start: () => neverStarted,
+      start: async () => {
+        await starts;
+        events.push(`started:${runId}`);
+      },
     } as any;
   });
 
-  await Promise.race([
-    orchestrator.close(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("orchestrator close timed out")), 100)),
-  ]);
+  const closePromise = orchestrator.close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  expect(events).toEqual([]);
+
+  resolveStarts?.();
+  await closePromise;
 
   expect(createdRuns).toBe(WARM_WORKERD_POOL_SIZE);
-  expect(closedRuns.toSorted()).toEqual(Array.from({ length: WARM_WORKERD_POOL_SIZE }, (_, index) => index));
+  for (let index = 0; index < WARM_WORKERD_POOL_SIZE; index++) {
+    expect(events.indexOf(`started:${index}`)).toBeLessThan(events.indexOf(`closed:${index}`));
+  }
 });

@@ -16,6 +16,7 @@ describe("Browser Rendering close race", () => {
     expect(output).not.toContain("Failed to launch the browser process");
     expect(output).not.toContain("SingletonLock");
     expect(output).not.toContain("ERR_RUNTIME_FAILURE");
+    expect(output).not.toContain("Not all browser processes were closed");
     expect(output).not.toContain("timed out");
   }, 25_000);
 });

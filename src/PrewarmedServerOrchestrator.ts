@@ -93,7 +93,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     this.#available.length = 0;
 
     await Promise.allSettled([
-      ...availableRuns.map(({ run }) => run.close()),
+      ...availableRuns.map((warmRun) => this.#closeWarmRun(warmRun)),
       ...Array.from(this.#inUse, (run) => run.close()),
     ]);
     this.#inUse.clear();
@@ -116,6 +116,14 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     );
     started.catch(() => {});
     return { run, started };
+  }
+
+  async #closeWarmRun({ run, started }: WarmHarnessRun<TWorkers>) {
+    // Closing a Wrangler harness while server.listen() is still starting can
+    // leave workerd children behind. Wait for startup to settle, then close the
+    // run through its normal teardown path.
+    await started.catch(() => {});
+    await run.close();
   }
 
   #fillWarmPool() {
