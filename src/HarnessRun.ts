@@ -157,6 +157,15 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
   }
 
+  async assertUsable() {
+    await this.start();
+    if (!this.#workers) {
+      throw new Error("Cloudflare harness run failed to start");
+    }
+
+    await Promise.all(Object.values(this.#workers).map((worker) => worker.getEnv()));
+  }
+
   async close() {
     if (this.#closed) return;
     this.#closed = true;

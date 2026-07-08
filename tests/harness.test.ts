@@ -11,6 +11,7 @@ type FakeWorker = {
 
 type FakeServer = {
   closeCalls: number;
+  getEnvError?: unknown;
   getWorkerCalls: string[];
   getLogsError?: unknown;
   listenCalls: number;
@@ -67,7 +68,12 @@ const createFakeServer = (): FakeServer => ({
     this.getWorkerCalls.push(String(name));
     const worker: Partial<FakeWorker> = { name };
     Object.defineProperty(worker, "getEnv", {
-      value: async () => this.workerEnvs[String(name)] ?? {},
+      value: async () => {
+        if (this.getEnvError) {
+          throw this.getEnvError;
+        }
+        return this.workerEnvs[String(name)] ?? {};
+      },
     });
     return worker as FakeWorker;
   },
@@ -380,6 +386,28 @@ test("prewarms the configured server pool and refills it when one is leased", as
 
   await closePrewarmedServerOrchestrators();
   expect(harnessServers.every((server) => server.closeCalls === 1)).toBe(true);
+});
+
+test("discards stale prewarmed servers before leasing them", async () => {
+  const serversBefore = createdServers.length;
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
+    },
+  });
+  const initialWarmServers = createdServers.slice(serversBefore);
+  initialWarmServers[0].getEnvError = new Error("poisoned warm server");
+
+  let leasedServer!: FakeServer;
+  await harness.run((_workers, server) => {
+    leasedServer = server as unknown as FakeServer;
+  });
+
+  expect(leasedServer).not.toBe(initialWarmServers[0]);
+  expect(initialWarmServers[0].closeCalls).toBe(1);
+  expect(leasedServer.closeCalls).toBe(1);
+
+  await closePrewarmedServerOrchestrators();
 });
 
 test("run context throws outside harness.run", () => {

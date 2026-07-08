@@ -64,13 +64,28 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
 
-    const warmRun = this.#available.shift() ?? this.#createStartedRun();
-    this.#fillWarmPool();
+    let run: HarnessRun<TWorkers>;
+    let discardedRuns = 0;
+    while (true) {
+      const warmRun = this.#available.shift() ?? this.#createStartedRun();
+      this.#fillWarmPool();
 
-    const run = await warmRun.started;
-    if (this.#closed) {
-      await run.close();
-      throw new Error("Cloudflare server orchestrator is closed");
+      run = await warmRun.started;
+      if (this.#closed) {
+        await run.close();
+        throw new Error("Cloudflare server orchestrator is closed");
+      }
+
+      try {
+        await run.assertUsable();
+        break;
+      } catch (error) {
+        await run.close();
+        discardedRuns += 1;
+        if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
+          throw error;
+        }
+      }
     }
 
     this.#inUse.add(run);
