@@ -16,6 +16,7 @@ import {
 type WorkerInput = TestHarnessOptions["workers"][number];
 
 export type PreparedWorkerInput = {
+  browserBindingName: string | undefined;
   built: boolean;
   durationMs: number;
   hasBrowserRendering: boolean;
@@ -105,6 +106,29 @@ const closeServer = async (server: TestHarness) => {
   } catch (error) {
     console.error("[bun-test-cloudflare] Failed closing Wrangler test server:");
     console.error(error);
+    return error;
+  }
+};
+
+type BrowserSession = {
+  sessionId?: unknown;
+};
+
+const getBrowserRenderingSessions = async (binding: Fetcher) => {
+  const response = await binding.fetch("https://bun-test-cloudflare.invalid/v1/sessions");
+  if (!response.ok) {
+    return [];
+  }
+
+  const body = (await response.json()) as { sessions?: BrowserSession[] };
+  return Array.isArray(body.sessions) ? body.sessions : [];
+};
+
+const closeBrowserRenderingSession = async (binding: Fetcher, sessionId: string) => {
+  const url = `https://bun-test-cloudflare.invalid/v1/devtools/browser/${encodeURIComponent(sessionId)}`;
+  const response = await binding.fetch(url, { method: "DELETE" });
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    throw new Error(`Failed closing Browser Rendering session ${sessionId}: HTTP ${response.status}`);
   }
 };
 
@@ -180,13 +204,22 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       drainBrowserRendering: this.options.hasBrowserRendering,
       platformProxyDispatches: this.#platformProxyDispatches,
     });
+    await this.#closeActiveBrowserRenderingSessions();
+    await drainHarnessRun({
+      devEnvs: this.#capturedDevEnvs,
+      drainBrowserRendering: this.options.hasBrowserRendering,
+      platformProxyDispatches: this.#platformProxyDispatches,
+    });
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] drained harness run");
     }
     this.#logStream.flush();
     this.#logStream.stop();
-    await closeServer(this.#server);
+    const closeError = await closeServer(this.#server);
     await disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs);
+    if (closeError) {
+      throw closeError;
+    }
   }
 
   #getWorkers() {
@@ -196,5 +229,57 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
         return [key, handle];
       }),
     ) as unknown as CloudflareWorkerMap<TWorkers>;
+  }
+
+  async #closeActiveBrowserRenderingSessions() {
+    if (!this.options.hasBrowserRendering || !this.#workers) {
+      return;
+    }
+
+    const workerEntriesByName = new Map(
+      this.options.workerEntries.map(([key, worker]) => [worker.name ?? String(key), key]),
+    );
+
+    for (const preparedWorker of this.options.preparedWorkers) {
+      const browserBindingName = preparedWorker.browserBindingName;
+      if (!browserBindingName) {
+        continue;
+      }
+
+      const workerKey = workerEntriesByName.get(preparedWorker.name);
+      if (!workerKey) {
+        continue;
+      }
+
+      const worker = this.#workers[workerKey];
+      if (!worker) {
+        continue;
+      }
+
+      try {
+        const env = (await worker.getEnv()) as Record<string, unknown>;
+        const binding = env[browserBindingName] as Fetcher | undefined;
+        if (!binding || typeof binding.fetch !== "function") {
+          continue;
+        }
+
+        const sessions = await getBrowserRenderingSessions(binding);
+        if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP && sessions.length > 0) {
+          console.error(
+            `[bun-test-cloudflare] closing ${sessions.length} Browser Rendering session(s) for ${preparedWorker.name}`,
+          );
+        }
+        await Promise.all(
+          sessions.map(async (session) => {
+            if (typeof session.sessionId === "string") {
+              await closeBrowserRenderingSession(binding, session.sessionId);
+            }
+          }),
+        );
+      } catch (error) {
+        console.error("[bun-test-cloudflare] Failed closing active Browser Rendering sessions:");
+        console.error(error);
+      }
+    }
   }
 }

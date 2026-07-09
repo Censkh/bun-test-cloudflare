@@ -502,13 +502,20 @@ const prepareWorkerInput = (
   const testConfig = withTestEnvironmentDefine(config);
   const buildPlan = createWorkerBuildPlan(workerName, outdir, testConfig, config, env, additionalModuleSourceRoots);
   const buildResult = buildWorkerOnce(buildPlan);
+  const browserConfig = (testConfig as Record<string, unknown>).browser;
+  const browserBindingName =
+    typeof browserConfig === "object" &&
+    browserConfig !== null &&
+    "binding" in browserConfig &&
+    typeof browserConfig.binding === "string"
+      ? browserConfig.binding
+      : undefined;
 
   return {
+    browserBindingName,
     built: buildResult.built,
     durationMs: performance.now() - start,
-    hasBrowserRendering:
-      typeof (testConfig as Record<string, unknown>).browser === "object" &&
-      (testConfig as Record<string, unknown>).browser !== null,
+    hasBrowserRendering: browserBindingName !== undefined,
     input: {
       config: {
         ...testConfig,
