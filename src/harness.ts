@@ -90,6 +90,11 @@ const withDryRunModuleRules = (rules: Array<Record<string, any>> | undefined) =>
   { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
 ];
 
+const withDryRunBuildConfig = (config: Record<string, any>) => ({
+  ...config,
+  find_additional_modules: false,
+});
+
 const additionalModuleRuleTypes = new Set(["CommonJS", "CompiledWasm", "Data", "ESModule", "Text"]);
 
 const sanitizeWorkerName = (workerName: string) => workerName.replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -382,7 +387,7 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
 
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
-      const testConfigPath = writeResolvedConfig(plan.outdir, plan.testConfig);
+      const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
       runWranglerDryRun(testConfigPath, plan.outdir, plan.env);
       const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
       copyAdditionalModules(plan);

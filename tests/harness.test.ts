@@ -1,5 +1,5 @@
 import { afterAll, expect, mock, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -190,6 +190,9 @@ test("passes worker configs to Wrangler while preserving typed worker keys", asy
     path.join(testRoot, "node_modules/.btcf/worker-build/backend-worker/wrangler.json"),
     path.join(testRoot, "node_modules/.btcf/worker-build/cms-worker/wrangler.json"),
   ]);
+  for (const configPath of configPaths) {
+    expect(JSON.parse(readFileSync(configPath, "utf8")).find_additional_modules).toBe(false);
+  }
 
   expect(workers.BACKEND as unknown).toEqual({ name: "backend-worker" });
   expect(workers.CMS as unknown).toEqual({ name: "CMS" });
@@ -240,6 +243,63 @@ test("prebuilds inline worker configs with the same test transform", async () =>
   expect(spawnedCommands.at(-1)).toContain(
     path.join(testRoot, "node_modules/.btcf/worker-build/inline-backend/wrangler.json"),
   );
+});
+
+test("copies explicit additional modules without recursively copying harness build output", async () => {
+  const moduleRoot = path.join(testRoot, "copy-additional-modules");
+  const sourceModulePath = path.join(moduleRoot, "node_modules/payload/dist/uploads/isImage.js");
+  const staleHarnessModulePath = path.join(
+    moduleRoot,
+    "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js",
+  );
+  mkdirSync(path.dirname(sourceModulePath), { recursive: true });
+  mkdirSync(path.dirname(staleHarnessModulePath), { recursive: true });
+  writeFileSync(sourceModulePath, "export const isImage = () => true;\n");
+  writeFileSync(staleHarnessModulePath, "export const stale = true;\n");
+
+  const harness = createCloudflareHarness({
+    root: moduleRoot,
+    workers: {
+      CMS: {
+        config: {
+          compatibility_date: "2025-08-15",
+          find_additional_modules: true,
+          main: "src/cms.ts",
+          name: "copy-modules-cms",
+          rules: [{ type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] }],
+        },
+        name: "copy-modules-cms",
+      },
+    },
+  });
+
+  await harness.run(() => {});
+
+  const outdir = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms");
+  expect(existsSync(path.join(outdir, "node_modules/payload/dist/uploads/isImage.js"))).toBe(true);
+  expect(
+    existsSync(
+      path.join(outdir, "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js"),
+    ),
+  ).toBe(false);
+  expect(JSON.parse(readFileSync(path.join(outdir, "wrangler.json"), "utf8")).find_additional_modules).toBe(false);
+  expect(lastOptions).toEqual({
+    root: moduleRoot,
+    workers: [
+      {
+        config: expect.objectContaining({
+          base_dir: outdir,
+          find_additional_modules: true,
+          main: path.join(outdir, "worker.js"),
+          no_bundle: true,
+          rules: [
+            { type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] },
+            { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
+          ],
+        }),
+      },
+    ],
+  });
 });
 
 test("run starts the server, passes typed workers, and closes after success", async () => {
