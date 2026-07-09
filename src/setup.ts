@@ -10,12 +10,14 @@ import { installMiniflareWebGlobalsPatch } from "./patches/MiniflareWebGlobalsPa
 import { installUndiciPatch } from "./patches/UndiciPatch";
 import { installWebStreamPatch } from "./patches/WebStreamPatch";
 import { installWebsocketPatch } from "./patches/WebsocketPatch";
+import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
 import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
 import { installWranglerGuessWorkerFormatPatch } from "./patches/WranglerGuessWorkerFormatPatch";
 
 installWebStreamPatch();
 installGlobalCachesBridge();
 installChildProcessExtraFdPatch();
+installWorkerdChildProcessPatch();
 installBrowserRenderingPatch();
 installUndiciPatch();
 installWebsocketPatch();
