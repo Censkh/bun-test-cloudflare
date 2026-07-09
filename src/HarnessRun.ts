@@ -5,7 +5,6 @@ import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
-import { terminateWorkerdProcesses, workerdProcessCaptureContext } from "./patches/WorkerdProcessPatch";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
@@ -113,7 +112,6 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   readonly #capturedDevEnvs: CapturedDevEnv[] = [];
   readonly #platformProxyDispatches = createAsyncOperationTracker();
   readonly #server: TestHarness;
-  readonly #workerdProcesses = new Set<import("node:child_process").ChildProcess>();
   readonly #logStream: ReturnType<typeof streamServerLogs>;
   #cacheStorage: CacheStorage | undefined;
   #closed = false;
@@ -128,7 +126,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   start() {
     this.#startPromise ??= (async () => {
       await devEnvCaptureContext.run(this.#capturedDevEnvs, () => {
-        return workerdProcessCaptureContext.run(this.#workerdProcesses, () => this.#server.listen());
+        return this.#server.listen();
       });
       this.#cacheStorage = await getCapturedRuntimeCaches(this.#capturedDevEnvs);
       this.#workers = this.#getWorkers();
@@ -187,15 +185,8 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
     this.#logStream.flush();
     this.#logStream.stop();
-    // Miniflare's Runtime.dispose() also SIGKILLs workerd, but under Bun's
-    // child_process/extra-fd emulation we have seen Wrangler teardown resolve
-    // while the exact workerd child spawned for this run remains alive. Killing
-    // only the captured children here prevents leaked runtimes from keeping the
-    // Bun test worker open or poisoning later MessagePort replies.
-    await terminateWorkerdProcesses(this.#workerdProcesses);
     await closeServer(this.#server);
     await disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs);
-    await terminateWorkerdProcesses(this.#workerdProcesses);
   }
 
   #getWorkers() {
