@@ -5,6 +5,7 @@ import { drainDevEnvRuntimeMessages } from "./wranglerPatches";
 
 type DrainHarnessRunOptions = {
   devEnvs: CapturedDevEnv[];
+  drainBrowserRendering: boolean;
   platformProxyDispatches: AsyncOperationTracker;
 };
 
@@ -13,7 +14,20 @@ type DrainHarnessRunOptions = {
 // visible to the drain trackers before closing the Miniflare server.
 const allowRuntimeFollowUpWorkToStart = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-export const drainHarnessRun = async ({ devEnvs, platformProxyDispatches }: DrainHarnessRunOptions) => {
+const drainBrowserRenderingWork = async (enabled: boolean) => {
+  if (!enabled) {
+    return;
+  }
+
+  await drainMiniflareLoopbackRequests();
+  await drainBrowserRenderingLaunches();
+};
+
+export const drainHarnessRun = async ({
+  devEnvs,
+  drainBrowserRendering,
+  platformProxyDispatches,
+}: DrainHarnessRunOptions) => {
   await allowRuntimeFollowUpWorkToStart();
   await drainDevEnvRuntimeMessages(devEnvs);
   await platformProxyDispatches.drain();
@@ -22,10 +36,8 @@ export const drainHarnessRun = async ({ devEnvs, platformProxyDispatches }: Drai
   // loopback requests. Browser Rendering launch is one of those loopback paths,
   // and it is only safe to close the harness after the launch request has
   // produced a tracked Chrome process or finished.
-  await drainMiniflareLoopbackRequests();
-  await drainBrowserRenderingLaunches();
+  await drainBrowserRenderingWork(drainBrowserRendering);
   await allowRuntimeFollowUpWorkToStart();
   await drainDevEnvRuntimeMessages(devEnvs);
-  await drainMiniflareLoopbackRequests();
-  await drainBrowserRenderingLaunches();
+  await drainBrowserRenderingWork(drainBrowserRendering);
 };

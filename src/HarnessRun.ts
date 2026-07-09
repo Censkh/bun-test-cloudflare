@@ -17,6 +17,7 @@ type WorkerInput = TestHarnessOptions["workers"][number];
 export type PreparedWorkerInput = {
   built: boolean;
   durationMs: number;
+  hasBrowserRendering: boolean;
   input: WorkerInput;
   name: string;
 };
@@ -28,6 +29,7 @@ export type CloudflareHarnessRunContext<TWorkers extends Record<string, Cloudfla
 
 type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
   events: CloudflareHarnessConfig<TWorkers>["events"];
+  hasBrowserRendering: boolean;
   preparedWorkers: PreparedWorkerInput[];
   testHarnessOptions: Omit<TestHarnessOptions, "workers"> & { workers: WorkerInput[] };
   workerEntries: Array<[keyof TWorkers, CloudflareWorkerConfig]>;
@@ -174,6 +176,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
     await drainHarnessRun({
       devEnvs: this.#capturedDevEnvs,
+      drainBrowserRendering: this.options.hasBrowserRendering,
       platformProxyDispatches: this.#platformProxyDispatches,
     });
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {

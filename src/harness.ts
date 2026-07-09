@@ -499,6 +499,9 @@ const prepareWorkerInput = (
   return {
     built: buildResult.built,
     durationMs: performance.now() - start,
+    hasBrowserRendering:
+      typeof (testConfig as Record<string, unknown>).browser === "object" &&
+      (testConfig as Record<string, unknown>).browser !== null,
     input: {
       config: {
         ...testConfig,
@@ -528,9 +531,11 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     ...serverConfig,
     workers: preparedWorkers.map((worker) => worker.input),
   };
+  const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
       events,
+      hasBrowserRendering,
       preparedWorkers,
       testHarnessOptions,
       workerEntries,
