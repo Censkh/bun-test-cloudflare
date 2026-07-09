@@ -2,6 +2,7 @@ import type { HarnessRun } from "./HarnessRun";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
 export const WARM_WORKERD_POOL_SIZE = 2;
+const IDLE_WARM_WORKERD_POOL_CLOSE_DELAY_MS = 250;
 
 type PrewarmedServerOrchestratorRegistry = {
   closing: boolean;
@@ -54,6 +55,7 @@ export const closePrewarmedServerOrchestrators = async () => {
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
   readonly #available: Array<WarmHarnessRun<TWorkers>> = [];
   readonly #inUse = new Set<HarnessRun<TWorkers>>();
+  #idleCloseTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
 
   constructor(private readonly createRun: () => HarnessRun<TWorkers>) {
@@ -63,6 +65,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
+    this.#cancelIdleClose();
 
     let run: HarnessRun<TWorkers>;
     let discardedRuns = 0;
@@ -97,6 +100,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
           await run.close();
         }
         this.#fillWarmPool();
+        this.#scheduleIdleClose();
       },
     };
   }
@@ -104,6 +108,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   async close() {
     getPrewarmedServerOrchestratorRegistry().orchestrators.delete(this);
     this.#closed = true;
+    this.#cancelIdleClose();
     const availableRuns = this.#available.splice(0);
     this.#available.length = 0;
 
@@ -147,5 +152,28 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     while (this.#available.length < WARM_WORKERD_POOL_SIZE) {
       this.#available.push(this.#createStartedRun());
     }
+  }
+
+  #cancelIdleClose() {
+    if (!this.#idleCloseTimer) return;
+    clearTimeout(this.#idleCloseTimer);
+    this.#idleCloseTimer = undefined;
+  }
+
+  #scheduleIdleClose() {
+    if (this.#closed || this.#inUse.size > 0 || this.#available.length === 0 || this.#idleCloseTimer) {
+      return;
+    }
+
+    this.#idleCloseTimer = setTimeout(async () => {
+      this.#idleCloseTimer = undefined;
+      if (this.#closed || this.#inUse.size > 0) {
+        return;
+      }
+
+      const availableRuns = this.#available.splice(0);
+      await Promise.allSettled(availableRuns.map((warmRun) => this.#closeWarmRun(warmRun)));
+    }, IDLE_WARM_WORKERD_POOL_CLOSE_DELAY_MS);
+    this.#idleCloseTimer.unref?.();
   }
 }

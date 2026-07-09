@@ -20,7 +20,7 @@ import {
   HarnessRun,
   type PreparedWorkerInput,
 } from "./HarnessRun";
-import { PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
+import { closePrewarmedServerOrchestrators, PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator } from "./ServerOrchestrator";
 import { installWranglerPatches } from "./wranglerPatches";
 
@@ -31,6 +31,8 @@ export type TypeToken<T> = {
 };
 
 export const typeToken = <T>(): TypeToken<T> => ({});
+
+export { closePrewarmedServerOrchestrators };
 
 export type CloudflareWorkerConfig<TBindings = Record<string, any>> = WorkerInput & {
   bindings?: TypeToken<TBindings>;

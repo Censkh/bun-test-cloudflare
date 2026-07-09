@@ -1,8 +1,19 @@
 import childProcess from "node:child_process";
 import path from "node:path";
 
+type UnrefableStream = {
+  unref?: () => void;
+};
+
 const isWorkerdServe = (command: string, args?: readonly string[]) => {
   return path.basename(command).includes("workerd") && args?.includes("serve");
+};
+
+const unrefChildProcess = (child: childProcess.ChildProcess) => {
+  child.unref();
+  for (const stream of child.stdio ?? []) {
+    (stream as UnrefableStream | null)?.unref?.();
+  }
 };
 
 export const installWorkerdChildProcessPatch = () => {
@@ -21,10 +32,7 @@ export const installWorkerdChildProcessPatch = () => {
     const child = originalSpawn.call(this as any, command, args as string[], options as any);
 
     if (isWorkerdServe(command, args)) {
-      child.unref();
-      child.stdin?.unref?.();
-      child.stdout?.unref?.();
-      child.stderr?.unref?.();
+      unrefChildProcess(child);
     }
 
     return child;
