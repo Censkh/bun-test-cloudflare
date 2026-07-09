@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { drainHarnessRun } from "../src/HarnessRunTeardown";
-import { drainBrowserRenderingLaunches, trackBrowserRenderingLaunchRequest } from "../src/patches/BrowserRenderingPatch";
+import {
+  drainBrowserRenderingLaunches,
+  trackBrowserRenderingLaunchRequest,
+} from "../src/patches/BrowserRenderingPatch";
 
 const operationTracker = {
   drain: async () => {},
@@ -32,4 +35,3 @@ test("non-browser harness cleanup does not wait on unrelated browser launches", 
   response.emit("finish");
   await drainBrowserRenderingLaunches();
 });
-

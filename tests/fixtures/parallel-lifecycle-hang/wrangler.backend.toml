@@ -37,3 +37,7 @@ new_sqlite_classes = ["Counter"]
 
 [browser]
 binding = "BROWSER"
+
+[[flagship]]
+binding = "FLAGS"
+app_id = "parallel-lifecycle-hang-flags"
