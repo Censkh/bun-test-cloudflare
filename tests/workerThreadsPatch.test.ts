@@ -57,10 +57,11 @@ const afterListener = true;`;
   const patched = patchSynchronousFetcherWorkerScript(script);
 
   expect(patched).toContain("let nextMessage = Promise.resolve();");
+  expect(patched).toContain("const createStreamBridge = (stream) => {");
   expect(patched).toContain("const handleMessage = async (event) => {");
   expect(patched).toContain("nextMessage = nextMessage.then(() => handleMessage(event), () => handleMessage(event));");
-  expect(patched).toContain("const responseBody = await response.arrayBuffer();");
+  expect(patched).toContain("createStreamBridge(response.body)");
+  expect(patched).toContain("const body = await response.arrayBuffer();");
   expect(patched).toContain("const beforeListener = true;");
   expect(patched).toContain("const afterListener = true;");
-  expect(patched).not.toContain('response.headers.get("MF-Op-Result-Type") === "ReadableStream"');
 });

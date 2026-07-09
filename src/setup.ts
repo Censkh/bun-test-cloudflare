@@ -10,6 +10,7 @@ import { installMiniflareWebGlobalsPatch } from "./patches/MiniflareWebGlobalsPa
 import { installUndiciPatch } from "./patches/UndiciPatch";
 import { installWebStreamPatch } from "./patches/WebStreamPatch";
 import { installWebsocketPatch } from "./patches/WebsocketPatch";
+import { installWorkerdProcessPatch } from "./patches/WorkerdProcessPatch";
 import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
 import { installWranglerGuessWorkerFormatPatch } from "./patches/WranglerGuessWorkerFormatPatch";
 
@@ -20,6 +21,7 @@ installBrowserRenderingPatch();
 installUndiciPatch();
 installWebsocketPatch();
 installWorkerThreadsPatch();
+installWorkerdProcessPatch();
 installMiniflareWebGlobalsPatch();
 installWranglerGuessWorkerFormatPatch();
 installMiniflareLoopbackPatch();

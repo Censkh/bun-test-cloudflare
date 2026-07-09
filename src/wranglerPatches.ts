@@ -12,7 +12,11 @@ export type CapturedDevEnv = {
       drained?: () => Promise<void>;
     };
   };
-  runtimes?: unknown[];
+  runtimes?: Array<{
+    mf?: {
+      dispose?: () => Promise<void> | void;
+    };
+  }>;
 };
 
 export type AsyncOperationTracker = {
@@ -137,5 +141,16 @@ export const drainDevEnvRuntimeMessages = async (devEnvs: CapturedDevEnv[]) => {
     devEnvs.map(async (devEnv) => {
       await devEnv.proxy?.runtimeMessageMutex?.drained?.();
     }),
+  );
+};
+
+export const disposeCapturedMiniflareRuntimes = async (devEnvs: CapturedDevEnv[]) => {
+  await Promise.allSettled(
+    devEnvs.flatMap(
+      (devEnv) =>
+        devEnv.runtimes?.map(async (runtime) => {
+          await runtime.mf?.dispose?.();
+        }) ?? [],
+    ),
   );
 };
