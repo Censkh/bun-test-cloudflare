@@ -5,6 +5,7 @@ import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
+import { getObservedBrowserRenderingLaunchCount } from "./patches/BrowserRenderingPatch";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
@@ -134,6 +135,7 @@ const closeBrowserRenderingSession = async (binding: Fetcher, sessionId: string)
 
 export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>> {
   readonly #capturedDevEnvs: CapturedDevEnv[] = [];
+  readonly #initialBrowserRenderingLaunchCount = getObservedBrowserRenderingLaunchCount();
   readonly #platformProxyDispatches = createAsyncOperationTracker();
   readonly #server: TestHarness;
   readonly #logStream: ReturnType<typeof streamServerLogs>;
@@ -233,6 +235,9 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
   async #closeActiveBrowserRenderingSessions() {
     if (!this.options.hasBrowserRendering || !this.#workers) {
+      return;
+    }
+    if (getObservedBrowserRenderingLaunchCount() === this.#initialBrowserRenderingLaunchCount) {
       return;
     }
 

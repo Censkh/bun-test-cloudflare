@@ -7,6 +7,7 @@ const browserLaunchStartupTimeoutMs = 15_000;
 const pendingBrowserLaunches = new Set<Promise<void>>();
 const pendingBrowserLaunchRequests = new Set<Promise<void>>();
 const pendingBrowserLaunchRequestSettlers: Array<() => void> = [];
+let observedBrowserRenderingLaunchCount = 0;
 
 const isBrowserRenderingLaunch = (_command: string, args?: readonly string[]) => {
   return (
@@ -50,6 +51,7 @@ export const trackBrowserRenderingLaunchRequest = (response: http.ServerResponse
 };
 
 const trackBrowserLaunch = (child: childProcess.ChildProcess) => {
+  observedBrowserRenderingLaunchCount += 1;
   settleOneBrowserLaunchRequest();
 
   let settled = false;
@@ -92,6 +94,8 @@ export const drainBrowserRenderingLaunches = async () => {
     await Promise.allSettled([...pendingBrowserLaunchRequests, ...pendingBrowserLaunches]);
   }
 };
+
+export const getObservedBrowserRenderingLaunchCount = () => observedBrowserRenderingLaunchCount;
 
 export const installBrowserRenderingPatch = () => {
   const originalSpawn = childProcess.spawn;

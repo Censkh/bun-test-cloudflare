@@ -123,7 +123,7 @@ const sleepSync = (durationMs: number) => {
 };
 
 const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => error instanceof Error && "code" in error;
-const buildWaitTimeoutMs = 15_000;
+const buildWaitTimeoutMs = Number(process.env.BUN_TEST_CLOUDFLARE_BUILD_WAIT_TIMEOUT_MS ?? 120_000);
 
 type WorkerBuildStatus =
   | {
