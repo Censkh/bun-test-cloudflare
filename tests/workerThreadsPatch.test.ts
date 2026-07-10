@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { patchSynchronousFetcherWorkerScript } from "../src/patches/WorkerThreadsPatch";
+import { installWorkerThreadsPatch, patchSynchronousFetcherWorkerScript } from "../src/patches/WorkerThreadsPatch";
 
 test("patches Miniflare synchronous fetch worker to process messages FIFO", () => {
   const script = `
@@ -64,4 +64,28 @@ const afterListener = true;`;
   expect(patched).toContain("const body = await response.arrayBuffer();");
   expect(patched).toContain("const beforeListener = true;");
   expect(patched).toContain("const afterListener = true;");
+});
+
+test("buffers out-of-order synchronous fetch responses by id", () => {
+  installWorkerThreadsPatch();
+
+  const workerThreads = require("node:worker_threads") as typeof import("node:worker_threads");
+  const { port1, port2 } = new workerThreads.MessageChannel();
+
+  try {
+    port1.postMessage({ id: 0, method: "POST", url: "http://localhost/session", headers: {} });
+    port2.postMessage({ id: 1, response: { status: 200, headers: {}, body: new Uint8Array([1]).buffer } });
+    port2.postMessage({ id: 0, response: { status: 200, headers: {}, body: new Uint8Array([0]).buffer } });
+
+    const first = workerThreads.receiveMessageOnPort(port1);
+    expect(first?.message.id).toBe(0);
+
+    port1.postMessage({ id: 1, method: "POST", url: "http://localhost/session", headers: {} });
+
+    const second = workerThreads.receiveMessageOnPort(port1);
+    expect(second?.message.id).toBe(1);
+  } finally {
+    port1.close();
+    port2.close();
+  }
 });

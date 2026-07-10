@@ -123,19 +123,30 @@ export const patchSynchronousFetcherWorkerScript = (script: string) => {
 
 export const installWorkerThreadsPatch = () => {
   const workerThreads = require("node:worker_threads") as typeof WorkerThreads;
+  type PortMessage = NonNullable<ReturnType<typeof workerThreads.receiveMessageOnPort>>;
 
-  class WorkerThreadsCompatWorker extends workerThreads.Worker {
-    constructor(filename: string | URL, options?: WorkerThreads.WorkerOptions) {
-      super(
-        typeof filename === "string" && options?.eval ? patchSynchronousFetcherWorkerScript(filename) : filename,
-        options,
-      );
+  const bufferedPortMessages = new WeakMap<WorkerThreads.MessagePort, Map<number, PortMessage>>();
+  const expectedPortMessageIds = new WeakMap<WorkerThreads.MessagePort, number>();
+
+  const sleepSync = (durationMs: number) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs);
+  };
+
+  const getBufferedMessages = (port: WorkerThreads.MessagePort) => {
+    let messages = bufferedPortMessages.get(port);
+    if (!messages) {
+      messages = new Map();
+      bufferedPortMessages.set(port, messages);
     }
-  }
+    return messages;
+  };
 
-  const originalReceiveMessageOnPort = workerThreads.receiveMessageOnPort;
-  const receiveMessageOnPort = (port: WorkerThreads.MessagePort) => {
-    const message = originalReceiveMessageOnPort(port);
+  const getMessageId = (message: PortMessage | undefined) => {
+    const id = message?.message?.id;
+    return typeof id === "number" ? id : undefined;
+  };
+
+  const normalizeMessage = (message: PortMessage | undefined) => {
     const response = message?.message?.response;
     if (!response) {
       return message;
@@ -177,6 +188,67 @@ export const installWorkerThreadsPatch = () => {
       },
     });
     return message;
+  };
+
+  class WorkerThreadsCompatWorker extends workerThreads.Worker {
+    constructor(filename: string | URL, options?: WorkerThreads.WorkerOptions) {
+      super(
+        typeof filename === "string" && options?.eval ? patchSynchronousFetcherWorkerScript(filename) : filename,
+        options,
+      );
+    }
+  }
+
+  const originalMessagePortPostMessage = workerThreads.MessagePort.prototype.postMessage;
+  workerThreads.MessagePort.prototype.postMessage = function bunTestCloudflarePostMessage(
+    this: WorkerThreads.MessagePort,
+    ...args: Parameters<WorkerThreads.MessagePort["postMessage"]>
+  ) {
+    const [value] = args;
+    if (
+      typeof value?.id === "number" &&
+      typeof value?.url === "string" &&
+      typeof value?.method === "string" &&
+      value?.headers &&
+      typeof value.headers === "object"
+    ) {
+      expectedPortMessageIds.set(this, value.id);
+    }
+    return originalMessagePortPostMessage.apply(this, args as any);
+  } as WorkerThreads.MessagePort["postMessage"];
+
+  const originalReceiveMessageOnPort = workerThreads.receiveMessageOnPort;
+  const receiveMessageOnPort = (port: WorkerThreads.MessagePort) => {
+    const expectedId = expectedPortMessageIds.get(port);
+    if (expectedId !== undefined) {
+      const bufferedMessages = getBufferedMessages(port);
+      const bufferedMessage = bufferedMessages.get(expectedId);
+      if (bufferedMessage) {
+        bufferedMessages.delete(expectedId);
+        expectedPortMessageIds.delete(port);
+        return normalizeMessage(bufferedMessage);
+      }
+
+      const start = Date.now();
+      while (Date.now() - start < 5_000) {
+        const message = originalReceiveMessageOnPort(port);
+        const messageId = getMessageId(message);
+        if (messageId === expectedId) {
+          expectedPortMessageIds.delete(port);
+          return normalizeMessage(message);
+        }
+        if (messageId !== undefined && message) {
+          bufferedMessages.set(messageId, message);
+        } else if (message) {
+          return message;
+        } else {
+          sleepSync(1);
+        }
+      }
+    }
+
+    const message = originalReceiveMessageOnPort(port);
+    return normalizeMessage(message);
   };
 
   workerThreads.Worker = WorkerThreadsCompatWorker as typeof workerThreads.Worker;
