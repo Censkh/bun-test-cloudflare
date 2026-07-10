@@ -111,6 +111,34 @@ const closeServer = async (server: TestHarness) => {
   }
 };
 
+const debugCleanup = async <T>(step: string, task: () => Promise<T>) => {
+  if (!process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
+    return task();
+  }
+
+  const start = Date.now();
+  console.error(`[bun-test-cloudflare] cleanup:${step}:start`);
+  try {
+    return await task();
+  } finally {
+    console.error(`[bun-test-cloudflare] cleanup:${step}:end ${Date.now() - start}ms`);
+  }
+};
+
+const debugCleanupSync = <T>(step: string, task: () => T) => {
+  if (!process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
+    return task();
+  }
+
+  const start = Date.now();
+  console.error(`[bun-test-cloudflare] cleanup:${step}:start`);
+  try {
+    return task();
+  } finally {
+    console.error(`[bun-test-cloudflare] cleanup:${step}:end ${Date.now() - start}ms`);
+  }
+};
+
 type BrowserSession = {
   sessionId?: unknown;
 };
@@ -201,24 +229,28 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] draining runtime messages");
     }
-    await drainHarnessRun({
-      devEnvs: this.#capturedDevEnvs,
-      drainBrowserRendering: this.options.hasBrowserRendering,
-      platformProxyDispatches: this.#platformProxyDispatches,
-    });
-    await this.#closeActiveBrowserRenderingSessions();
-    await drainHarnessRun({
-      devEnvs: this.#capturedDevEnvs,
-      drainBrowserRendering: this.options.hasBrowserRendering,
-      platformProxyDispatches: this.#platformProxyDispatches,
-    });
+    await debugCleanup("drain-harness-before-browser-close", () =>
+      drainHarnessRun({
+        devEnvs: this.#capturedDevEnvs,
+        drainBrowserRendering: this.options.hasBrowserRendering,
+        platformProxyDispatches: this.#platformProxyDispatches,
+      }),
+    );
+    await debugCleanup("close-active-browser-sessions", () => this.#closeActiveBrowserRenderingSessions());
+    await debugCleanup("drain-harness-after-browser-close", () =>
+      drainHarnessRun({
+        devEnvs: this.#capturedDevEnvs,
+        drainBrowserRendering: this.options.hasBrowserRendering,
+        platformProxyDispatches: this.#platformProxyDispatches,
+      }),
+    );
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] drained harness run");
     }
-    this.#logStream.flush();
-    this.#logStream.stop();
-    const closeError = await closeServer(this.#server);
-    await disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs);
+    debugCleanupSync("flush-log-stream", () => this.#logStream.flush());
+    debugCleanupSync("stop-log-stream", () => this.#logStream.stop());
+    const closeError = await debugCleanup("close-server", () => closeServer(this.#server));
+    await debugCleanup("dispose-miniflare-runtimes", () => disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs));
     if (closeError) {
       throw closeError;
     }

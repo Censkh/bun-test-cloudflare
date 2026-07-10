@@ -419,7 +419,7 @@ test("parallel run calls use independent servers", async () => {
   expect(secondServer.closeCalls).toBe(1);
 });
 
-test("prewarms the configured server pool and refills it when one is leased", async () => {
+test("prewarms the configured server pool and refills it after a lease is released", async () => {
   const serversBefore = createdServers.length;
   const harness = createCloudflareHarness({
     workers: {
@@ -435,12 +435,11 @@ test("prewarms the configured server pool and refills it when one is leased", as
   await harness.run((_workers, server) => {
     leasedServer = server as unknown as FakeServer;
     expect(initialWarmServers).toContain(leasedServer);
-    expect(createdServers.slice(serversBefore)).toHaveLength(WARM_WORKERD_POOL_SIZE + 1);
-    expect(createdServers.at(-1)).not.toBe(leasedServer);
-    expect(createdServers.at(-1)?.listenCalls).toBe(1);
+    expect(createdServers.slice(serversBefore)).toHaveLength(WARM_WORKERD_POOL_SIZE);
   });
 
   const harnessServers = createdServers.slice(serversBefore);
+  expect(harnessServers).toHaveLength(WARM_WORKERD_POOL_SIZE + 1);
   expect(leasedServer.closeCalls).toBe(1);
   expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(WARM_WORKERD_POOL_SIZE);
 

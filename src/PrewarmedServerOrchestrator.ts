@@ -3,6 +3,7 @@ import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
 export const WARM_WORKERD_POOL_SIZE = 2;
 const IDLE_WARM_WORKERD_POOL_CLOSE_DELAY_MS = 250;
+const DEFAULT_WARM_WORKERD_START_TIMEOUT_MS = 30_000;
 
 type PrewarmedServerOrchestratorRegistry = {
   closing: boolean;
@@ -41,6 +42,32 @@ const getPrewarmedServerOrchestratorRegistry = () => {
   return registry;
 };
 
+const getWarmStartTimeoutMs = () => {
+  const value = Number(process.env.BUN_TEST_CLOUDFLARE_WARM_START_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_WARM_WORKERD_START_TIMEOUT_MS;
+};
+
+const waitForWarmStart = async <TWorkers extends Record<string, any>>(warmRun: WarmHarnessRun<TWorkers>) => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      warmRun.started,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(
+            new Error(`Timed out waiting for prewarmed Cloudflare server startup after ${getWarmStartTimeoutMs()}ms`),
+          );
+        }, getWarmStartTimeoutMs());
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+};
+
 export const closePrewarmedServerOrchestrators = async () => {
   const registry = globalThis.__bunTestCloudflarePrewarmedServerOrchestrators;
   if (!registry || registry.closing) {
@@ -71,9 +98,18 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     let discardedRuns = 0;
     while (true) {
       const warmRun = this.#available.shift() ?? this.#createStartedRun();
-      this.#fillWarmPool();
 
-      run = await warmRun.started;
+      try {
+        run = await waitForWarmStart(warmRun);
+      } catch (error) {
+        await warmRun.run.close();
+        discardedRuns += 1;
+        if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
+          throw error;
+        }
+        continue;
+      }
+
       if (this.#closed) {
         await run.close();
         throw new Error("Cloudflare server orchestrator is closed");
@@ -140,9 +176,9 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
   async #closeWarmRun({ run, started }: WarmHarnessRun<TWorkers>) {
     // Closing a Wrangler harness while server.listen() is still starting can
-    // leave workerd children behind. Wait for startup to settle, then close the
-    // run through its normal teardown path.
-    await started.catch(() => {});
+    // leave workerd children behind. Wait for startup to settle when possible,
+    // but never let a stuck background prewarm block test teardown forever.
+    await waitForWarmStart({ run, started }).catch(() => {});
     await run.close();
   }
 
