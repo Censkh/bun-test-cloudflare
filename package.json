@@ -37,10 +37,10 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "@types/ws": "^8.18.1",
-    "typescript": "7.0.1-rc",
-    "wrangler": "4.107.0"
+    "typescript": "7.0.2",
+    "wrangler": "4.110.0"
   },
   "peerDependencies": {
     "wrangler": ">=4.104.0"
