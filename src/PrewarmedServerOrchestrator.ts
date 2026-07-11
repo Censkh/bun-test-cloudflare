@@ -2,11 +2,18 @@ import type { HarnessRun } from "./HarnessRun";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
 export const WARM_WORKERD_POOL_SIZE = 2;
+const IDLE_WARM_WORKERD_POOL_CLOSE_DELAY_MS = 250;
+const DEFAULT_WARM_WORKERD_START_TIMEOUT_MS = 30_000;
 
 type PrewarmedServerOrchestratorRegistry = {
   closing: boolean;
   installed: boolean;
   orchestrators: Set<PrewarmedServerOrchestrator<any>>;
+};
+
+type WarmHarnessRun<TWorkers extends Record<string, any>> = {
+  run: HarnessRun<TWorkers>;
+  started: Promise<HarnessRun<TWorkers>>;
 };
 
 declare global {
@@ -35,9 +42,47 @@ const getPrewarmedServerOrchestratorRegistry = () => {
   return registry;
 };
 
+const getWarmStartTimeoutMs = () => {
+  const value = Number(process.env.BUN_TEST_CLOUDFLARE_WARM_START_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_WARM_WORKERD_START_TIMEOUT_MS;
+};
+
+const waitForWarmStart = async <TWorkers extends Record<string, any>>(warmRun: WarmHarnessRun<TWorkers>) => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      warmRun.started,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(
+            new Error(`Timed out waiting for prewarmed Cloudflare server startup after ${getWarmStartTimeoutMs()}ms`),
+          );
+        }, getWarmStartTimeoutMs());
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+};
+
+export const closePrewarmedServerOrchestrators = async () => {
+  const registry = globalThis.__bunTestCloudflarePrewarmedServerOrchestrators;
+  if (!registry || registry.closing) {
+    return;
+  }
+
+  registry.closing = true;
+  await Promise.allSettled(Array.from(registry.orchestrators, (orchestrator) => orchestrator.close()));
+  registry.closing = false;
+};
+
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
-  readonly #available: Array<Promise<HarnessRun<TWorkers>>> = [];
+  readonly #available: Array<WarmHarnessRun<TWorkers>> = [];
   readonly #inUse = new Set<HarnessRun<TWorkers>>();
+  #idleCloseTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
 
   constructor(private readonly createRun: () => HarnessRun<TWorkers>) {
@@ -47,14 +92,39 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
+    this.#cancelIdleClose();
 
-    const runPromise = this.#available.shift() ?? this.#createStartedRun();
-    this.#fillWarmPool();
+    let run: HarnessRun<TWorkers>;
+    let discardedRuns = 0;
+    while (true) {
+      const warmRun = this.#available.shift() ?? this.#createStartedRun();
 
-    const run = await runPromise;
-    if (this.#closed) {
-      await run.close();
-      throw new Error("Cloudflare server orchestrator is closed");
+      try {
+        run = await waitForWarmStart(warmRun);
+      } catch (error) {
+        await warmRun.run.close();
+        discardedRuns += 1;
+        if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
+          throw error;
+        }
+        continue;
+      }
+
+      if (this.#closed) {
+        await run.close();
+        throw new Error("Cloudflare server orchestrator is closed");
+      }
+
+      try {
+        await run.assertUsable();
+        break;
+      } catch (error) {
+        await run.close();
+        discardedRuns += 1;
+        if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
+          throw error;
+        }
+      }
     }
 
     this.#inUse.add(run);
@@ -66,6 +136,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
           await run.close();
         }
         this.#fillWarmPool();
+        this.#scheduleIdleClose();
       },
     };
   }
@@ -73,11 +144,12 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   async close() {
     getPrewarmedServerOrchestratorRegistry().orchestrators.delete(this);
     this.#closed = true;
-    const availableRuns = await Promise.allSettled(this.#available);
+    this.#cancelIdleClose();
+    const availableRuns = this.#available.splice(0);
     this.#available.length = 0;
 
     await Promise.allSettled([
-      ...availableRuns.map((result) => (result.status === "fulfilled" ? result.value.close() : undefined)),
+      ...availableRuns.map((warmRun) => this.#closeWarmRun(warmRun)),
       ...Array.from(this.#inUse, (run) => run.close()),
     ]);
     this.#inUse.clear();
@@ -99,7 +171,15 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       },
     );
     started.catch(() => {});
-    return started;
+    return { run, started };
+  }
+
+  async #closeWarmRun({ run, started }: WarmHarnessRun<TWorkers>) {
+    // Closing a Wrangler harness while server.listen() is still starting can
+    // leave workerd children behind. Wait for startup to settle when possible,
+    // but never let a stuck background prewarm block test teardown forever.
+    await waitForWarmStart({ run, started }).catch(() => {});
+    await run.close();
   }
 
   #fillWarmPool() {
@@ -108,5 +188,28 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     while (this.#available.length < WARM_WORKERD_POOL_SIZE) {
       this.#available.push(this.#createStartedRun());
     }
+  }
+
+  #cancelIdleClose() {
+    if (!this.#idleCloseTimer) return;
+    clearTimeout(this.#idleCloseTimer);
+    this.#idleCloseTimer = undefined;
+  }
+
+  #scheduleIdleClose() {
+    if (this.#closed || this.#inUse.size > 0 || this.#available.length === 0 || this.#idleCloseTimer) {
+      return;
+    }
+
+    this.#idleCloseTimer = setTimeout(async () => {
+      this.#idleCloseTimer = undefined;
+      if (this.#closed || this.#inUse.size > 0) {
+        return;
+      }
+
+      const availableRuns = this.#available.splice(0);
+      await Promise.allSettled(availableRuns.map((warmRun) => this.#closeWarmRun(warmRun)));
+    }, IDLE_WARM_WORKERD_POOL_CLOSE_DELAY_MS);
+    this.#idleCloseTimer.unref?.();
   }
 }

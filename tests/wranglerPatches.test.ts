@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import {
   createAsyncOperationTracker,
+  disposeCapturedMiniflareRuntimes,
   platformProxyDispatchContext,
   trackPlatformProxyDispatch,
 } from "../src/wranglerPatches";
@@ -63,4 +64,36 @@ test("tracks platform proxy dispatches until they finish", async () => {
   } finally {
     await server.stop(true);
   }
+});
+
+test("disposes captured Miniflare runtimes after Wrangler close", async () => {
+  const disposed: string[] = [];
+
+  await disposeCapturedMiniflareRuntimes([
+    {
+      runtimes: [
+        {
+          mf: {
+            dispose: async () => {
+              disposed.push("first");
+            },
+          },
+        },
+        {},
+      ],
+    },
+    {
+      runtimes: [
+        {
+          mf: {
+            dispose: () => {
+              disposed.push("second");
+            },
+          },
+        },
+      ],
+    },
+  ]);
+
+  expect(disposed.sort()).toEqual(["first", "second"]);
 });

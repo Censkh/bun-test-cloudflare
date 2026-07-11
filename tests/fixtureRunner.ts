@@ -53,6 +53,7 @@ export const runBunFixture = (
   fixtureRoot: string,
   options: {
     env?: NodeJS.ProcessEnv;
+    fixtureTests?: string[];
     installMode?: "full" | "lockfile";
     logOutput?: boolean;
     testArgs?: string[];
@@ -99,7 +100,7 @@ export const runBunFixture = (
     }
   }
 
-  const fixtureTests = findFixtureTests(fixtureRoot);
+  const fixtureTests = options.fixtureTests ?? findFixtureTests(fixtureRoot);
   if (fixtureTests.length === 0) {
     return createBunFixtureResult(fixtureRoot, {
       durationMs: performance.now() - start,

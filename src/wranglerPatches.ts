@@ -12,7 +12,11 @@ export type CapturedDevEnv = {
       drained?: () => Promise<void>;
     };
   };
-  runtimes?: unknown[];
+  runtimes?: Array<{
+    mf?: {
+      dispose?: () => Promise<void> | void;
+    };
+  }>;
 };
 
 export type AsyncOperationTracker = {
@@ -101,7 +105,28 @@ const installDevEnvCapture = () => {
     wranglerModule.unstable_DevEnv = class BunTestCloudflareCapturedDevEnv extends OriginalDevEnv {
       constructor(...args: any[]) {
         super(...args);
+        this.#installConfigPatch();
         devEnvCaptureContext.getStore()?.push(this);
+      }
+
+      #installConfigPatch() {
+        const config = this.config;
+        if (config?.set && !(config.set as any).__bunTestCloudflareTraced) {
+          const originalSet = config.set.bind(config);
+          config.set = (async (...setArgs: any[]) => {
+            const input = setArgs[0];
+            if (input && typeof input === "object" && input.dev && typeof input.dev === "object") {
+              // Wrangler's createTestHarness() does not set `dev.remote`.
+              // Undefined enables remote binding proxy setup for bindings that
+              // cannot be simulated locally (for example Flagship). These tests
+              // run against Miniflare-local bindings, so force local mode before
+              // ConfigController resolves the worker bindings.
+              input.dev.remote = false;
+            }
+            return (originalSet as (...args: any[]) => Promise<unknown>)(...setArgs);
+          }) as typeof config.set;
+          Object.defineProperty(config.set, "__bunTestCloudflareTraced", { value: true });
+        }
       }
     };
   } catch {}
@@ -116,5 +141,16 @@ export const drainDevEnvRuntimeMessages = async (devEnvs: CapturedDevEnv[]) => {
     devEnvs.map(async (devEnv) => {
       await devEnv.proxy?.runtimeMessageMutex?.drained?.();
     }),
+  );
+};
+
+export const disposeCapturedMiniflareRuntimes = async (devEnvs: CapturedDevEnv[]) => {
+  await Promise.allSettled(
+    devEnvs.flatMap(
+      (devEnv) =>
+        devEnv.runtimes?.map(async (runtime) => {
+          await runtime.mf?.dispose?.();
+        }) ?? [],
+    ),
   );
 };

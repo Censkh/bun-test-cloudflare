@@ -20,7 +20,7 @@ import {
   HarnessRun,
   type PreparedWorkerInput,
 } from "./HarnessRun";
-import { PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
+import { closePrewarmedServerOrchestrators, PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator } from "./ServerOrchestrator";
 import { installWranglerPatches } from "./wranglerPatches";
 
@@ -31,6 +31,8 @@ export type TypeToken<T> = {
 };
 
 export const typeToken = <T>(): TypeToken<T> => ({});
+
+export { closePrewarmedServerOrchestrators };
 
 export type CloudflareWorkerConfig<TBindings = Record<string, any>> = WorkerInput & {
   bindings?: TypeToken<TBindings>;
@@ -90,6 +92,11 @@ const withDryRunModuleRules = (rules: Array<Record<string, any>> | undefined) =>
   { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
 ];
 
+const withDryRunBuildConfig = (config: Record<string, any>) => ({
+  ...config,
+  find_additional_modules: false,
+});
+
 const additionalModuleRuleTypes = new Set(["CommonJS", "CompiledWasm", "Data", "ESModule", "Text"]);
 
 const sanitizeWorkerName = (workerName: string) => workerName.replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -116,7 +123,7 @@ const sleepSync = (durationMs: number) => {
 };
 
 const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => error instanceof Error && "code" in error;
-const buildWaitTimeoutMs = 15_000;
+const buildWaitTimeoutMs = Number(process.env.BUN_TEST_CLOUDFLARE_BUILD_WAIT_TIMEOUT_MS ?? 120_000);
 
 type WorkerBuildStatus =
   | {
@@ -382,7 +389,7 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
 
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
-      const testConfigPath = writeResolvedConfig(plan.outdir, plan.testConfig);
+      const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
       runWranglerDryRun(testConfigPath, plan.outdir, plan.env);
       const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
       copyAdditionalModules(plan);
@@ -495,10 +502,20 @@ const prepareWorkerInput = (
   const testConfig = withTestEnvironmentDefine(config);
   const buildPlan = createWorkerBuildPlan(workerName, outdir, testConfig, config, env, additionalModuleSourceRoots);
   const buildResult = buildWorkerOnce(buildPlan);
+  const browserConfig = (testConfig as Record<string, unknown>).browser;
+  const browserBindingName =
+    typeof browserConfig === "object" &&
+    browserConfig !== null &&
+    "binding" in browserConfig &&
+    typeof browserConfig.binding === "string"
+      ? browserConfig.binding
+      : undefined;
 
   return {
+    browserBindingName,
     built: buildResult.built,
     durationMs: performance.now() - start,
+    hasBrowserRendering: browserBindingName !== undefined,
     input: {
       config: {
         ...testConfig,
@@ -528,9 +545,11 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     ...serverConfig,
     workers: preparedWorkers.map((worker) => worker.input),
   };
+  const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
       events,
+      hasBrowserRendering,
       preparedWorkers,
       testHarnessOptions,
       workerEntries,

@@ -5,18 +5,22 @@ import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
+import { getObservedBrowserRenderingLaunchCount } from "./patches/BrowserRenderingPatch";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
   devEnvCaptureContext,
+  disposeCapturedMiniflareRuntimes,
   platformProxyDispatchContext,
 } from "./wranglerPatches";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
 
 export type PreparedWorkerInput = {
+  browserBindingName: string | undefined;
   built: boolean;
   durationMs: number;
+  hasBrowserRendering: boolean;
   input: WorkerInput;
   name: string;
 };
@@ -28,6 +32,7 @@ export type CloudflareHarnessRunContext<TWorkers extends Record<string, Cloudfla
 
 type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
   events: CloudflareHarnessConfig<TWorkers>["events"];
+  hasBrowserRendering: boolean;
   preparedWorkers: PreparedWorkerInput[];
   testHarnessOptions: Omit<TestHarnessOptions, "workers"> & { workers: WorkerInput[] };
   workerEntries: Array<[keyof TWorkers, CloudflareWorkerConfig]>;
@@ -102,11 +107,63 @@ const closeServer = async (server: TestHarness) => {
   } catch (error) {
     console.error("[bun-test-cloudflare] Failed closing Wrangler test server:");
     console.error(error);
+    return error;
+  }
+};
+
+const debugCleanup = async <T>(step: string, task: () => Promise<T>) => {
+  if (!process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
+    return task();
+  }
+
+  const start = Date.now();
+  console.error(`[bun-test-cloudflare] cleanup:${step}:start`);
+  try {
+    return await task();
+  } finally {
+    console.error(`[bun-test-cloudflare] cleanup:${step}:end ${Date.now() - start}ms`);
+  }
+};
+
+const debugCleanupSync = <T>(step: string, task: () => T) => {
+  if (!process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
+    return task();
+  }
+
+  const start = Date.now();
+  console.error(`[bun-test-cloudflare] cleanup:${step}:start`);
+  try {
+    return task();
+  } finally {
+    console.error(`[bun-test-cloudflare] cleanup:${step}:end ${Date.now() - start}ms`);
+  }
+};
+
+type BrowserSession = {
+  sessionId?: unknown;
+};
+
+const getBrowserRenderingSessions = async (binding: Fetcher) => {
+  const response = await binding.fetch("https://bun-test-cloudflare.invalid/v1/sessions");
+  if (!response.ok) {
+    return [];
+  }
+
+  const body = (await response.json()) as { sessions?: BrowserSession[] };
+  return Array.isArray(body.sessions) ? body.sessions : [];
+};
+
+const closeBrowserRenderingSession = async (binding: Fetcher, sessionId: string) => {
+  const url = `https://bun-test-cloudflare.invalid/v1/devtools/browser/${encodeURIComponent(sessionId)}`;
+  const response = await binding.fetch(url, { method: "DELETE" });
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    throw new Error(`Failed closing Browser Rendering session ${sessionId}: HTTP ${response.status}`);
   }
 };
 
 export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>> {
   readonly #capturedDevEnvs: CapturedDevEnv[] = [];
+  readonly #initialBrowserRenderingLaunchCount = getObservedBrowserRenderingLaunchCount();
   readonly #platformProxyDispatches = createAsyncOperationTracker();
   readonly #server: TestHarness;
   readonly #logStream: ReturnType<typeof streamServerLogs>;
@@ -157,22 +214,46 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
   }
 
+  async assertUsable() {
+    await this.start();
+    if (!this.#workers) {
+      throw new Error("Cloudflare harness run failed to start");
+    }
+
+    await Promise.all(Object.values(this.#workers).map((worker) => worker.getEnv()));
+  }
+
   async close() {
     if (this.#closed) return;
     this.#closed = true;
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] draining runtime messages");
     }
-    await drainHarnessRun({
-      devEnvs: this.#capturedDevEnvs,
-      platformProxyDispatches: this.#platformProxyDispatches,
-    });
+    await debugCleanup("drain-harness-before-browser-close", () =>
+      drainHarnessRun({
+        devEnvs: this.#capturedDevEnvs,
+        drainBrowserRendering: this.options.hasBrowserRendering,
+        platformProxyDispatches: this.#platformProxyDispatches,
+      }),
+    );
+    await debugCleanup("close-active-browser-sessions", () => this.#closeActiveBrowserRenderingSessions());
+    await debugCleanup("drain-harness-after-browser-close", () =>
+      drainHarnessRun({
+        devEnvs: this.#capturedDevEnvs,
+        drainBrowserRendering: this.options.hasBrowserRendering,
+        platformProxyDispatches: this.#platformProxyDispatches,
+      }),
+    );
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] drained harness run");
     }
-    this.#logStream.flush();
-    this.#logStream.stop();
-    await closeServer(this.#server);
+    debugCleanupSync("flush-log-stream", () => this.#logStream.flush());
+    debugCleanupSync("stop-log-stream", () => this.#logStream.stop());
+    const closeError = await debugCleanup("close-server", () => closeServer(this.#server));
+    await debugCleanup("dispose-miniflare-runtimes", () => disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs));
+    if (closeError) {
+      throw closeError;
+    }
   }
 
   #getWorkers() {
@@ -182,5 +263,60 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
         return [key, handle];
       }),
     ) as unknown as CloudflareWorkerMap<TWorkers>;
+  }
+
+  async #closeActiveBrowserRenderingSessions() {
+    if (!this.options.hasBrowserRendering || !this.#workers) {
+      return;
+    }
+    if (getObservedBrowserRenderingLaunchCount() === this.#initialBrowserRenderingLaunchCount) {
+      return;
+    }
+
+    const workerEntriesByName = new Map(
+      this.options.workerEntries.map(([key, worker]) => [worker.name ?? String(key), key]),
+    );
+
+    for (const preparedWorker of this.options.preparedWorkers) {
+      const browserBindingName = preparedWorker.browserBindingName;
+      if (!browserBindingName) {
+        continue;
+      }
+
+      const workerKey = workerEntriesByName.get(preparedWorker.name);
+      if (!workerKey) {
+        continue;
+      }
+
+      const worker = this.#workers[workerKey];
+      if (!worker) {
+        continue;
+      }
+
+      try {
+        const env = (await worker.getEnv()) as Record<string, unknown>;
+        const binding = env[browserBindingName] as Fetcher | undefined;
+        if (!binding || typeof binding.fetch !== "function") {
+          continue;
+        }
+
+        const sessions = await getBrowserRenderingSessions(binding);
+        if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP && sessions.length > 0) {
+          console.error(
+            `[bun-test-cloudflare] closing ${sessions.length} Browser Rendering session(s) for ${preparedWorker.name}`,
+          );
+        }
+        await Promise.all(
+          sessions.map(async (session) => {
+            if (typeof session.sessionId === "string") {
+              await closeBrowserRenderingSession(binding, session.sessionId);
+            }
+          }),
+        );
+      } catch (error) {
+        console.error("[bun-test-cloudflare] Failed closing active Browser Rendering sessions:");
+        console.error(error);
+      }
+    }
   }
 }

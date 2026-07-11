@@ -1,18 +1,32 @@
 import http from "node:http";
+import { trackBrowserRenderingLaunchRequest } from "./BrowserRenderingPatch";
 
 const pendingLoopbackRequests = new Set<Promise<void>>();
 
-const isMiniflareInternalLoopbackRequest = (request: http.IncomingMessage) => {
+const getMiniflareInternalLoopbackPathname = (request: http.IncomingMessage) => {
   try {
-    const pathname = new URL(request.url ?? "", "http://localhost").pathname;
-    return pathname === "/browser/launch";
+    return new URL(request.url ?? "", "http://localhost").pathname;
   } catch {
-    return false;
+    return undefined;
   }
 };
 
-const trackRequest = (result: unknown) => {
-  const request = Promise.resolve(result).then(() => undefined);
+const trackLoopbackResponse = (response: http.ServerResponse) => {
+  let settled = false;
+  let settle!: () => void;
+  const request = new Promise<void>((resolve) => {
+    settle = () => {
+      if (settled) return;
+      settled = true;
+      response.off("close", settle);
+      response.off("finish", settle);
+      resolve();
+    };
+
+    response.once("close", settle);
+    response.once("finish", settle);
+  });
+
   pendingLoopbackRequests.add(request);
   request.finally(() => pendingLoopbackRequests.delete(request)).catch(() => {});
 };
@@ -36,11 +50,16 @@ export const installMiniflareLoopbackPatch = () => {
     }
 
     const wrappedListener: typeof listener = (request: http.IncomingMessage, response: http.ServerResponse) => {
-      const result = listener(request, response);
-      if (isMiniflareInternalLoopbackRequest(request)) {
-        trackRequest(result);
+      const pathname = getMiniflareInternalLoopbackPathname(request);
+      if (pathname === "/browser/launch") {
+        trackBrowserRenderingLaunchRequest(response);
+      } else if (pathname === "/browser/close") {
+        // Miniflare's Browser Rendering binding fires this loopback fetch without
+        // awaiting it. Draining the response avoids closing the harness while
+        // Miniflare still has the browser session registered.
+        trackLoopbackResponse(response);
       }
-      return result;
+      return listener(request, response);
     };
 
     return originalCreateServer.apply(this as any, [...args.slice(0, -1), wrappedListener] as any);
