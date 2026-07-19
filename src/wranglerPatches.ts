@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createRequire } from "node:module";
 
 export type CapturedDevEnv = {
   config?: {
@@ -89,7 +88,6 @@ export const trackPlatformProxyDispatch = (input: unknown, promise: Promise<Resp
 };
 
 const installDevEnvCapture = () => {
-  const require = createRequire(import.meta.url);
   const wranglerModule = require("wrangler") as WranglerModuleWithDevEnv;
   const OriginalDevEnv = wranglerModule.unstable_DevEnv;
   if (!OriginalDevEnv) {

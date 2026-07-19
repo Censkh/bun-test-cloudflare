@@ -1,13 +1,10 @@
 import { expect, test } from "bun:test";
-import { createRequire } from "node:module";
 import {
   createAsyncOperationTracker,
   disposeCapturedMiniflareRuntimes,
   platformProxyDispatchContext,
   trackPlatformProxyDispatch,
 } from "../src/wranglerPatches";
-
-const require = createRequire(import.meta.url);
 
 test("tracks platform proxy dispatches until they finish", async () => {
   const undici = require("undici") as { fetch: typeof fetch };
