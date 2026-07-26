@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { shouldInstallCompatibilityPatch } from "./CompatibilityPatches";
 import type { CapturedDevEnv } from "./wranglerPatches";
 
 type RuntimeMiniflare = {
@@ -66,10 +67,16 @@ const getNamedCacheProxy = (cacheName: string) => {
 const cacheStorageProxy = new Proxy({} as CacheStorage, {
   get(_target, property) {
     if (property === "default") {
+      if (!shouldInstallCompatibilityPatch("global-caches-default")) {
+        return undefined;
+      }
       return defaultCacheProxy;
     }
 
     if (property === "open") {
+      if (!shouldInstallCompatibilityPatch("global-caches-named")) {
+        return undefined;
+      }
       return async (cacheName: string) => getNamedCacheProxy(cacheName);
     }
 
@@ -79,6 +86,9 @@ const cacheStorageProxy = new Proxy({} as CacheStorage, {
 });
 
 export const installGlobalCachesBridge = () => {
+  if (!shouldInstallCompatibilityPatch("global-caches-install")) {
+    return;
+  }
   if (globalThis.__bunTestCloudflareCachesBridgeInstalled) {
     return;
   }

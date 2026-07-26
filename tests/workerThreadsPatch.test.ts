@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { shouldInstallCompatibilityPatch } from "../src/CompatibilityPatches";
 import { installWorkerThreadsPatch, patchSynchronousFetcherWorkerScript } from "../src/patches/WorkerThreadsPatch";
 
 test("patches Miniflare synchronous fetch worker to process messages FIFO", () => {
@@ -67,6 +68,10 @@ const afterListener = true;`;
 });
 
 test("buffers out-of-order synchronous fetch responses by id", () => {
+  if (!shouldInstallCompatibilityPatch("worker-threads-fifo")) {
+    return;
+  }
+
   installWorkerThreadsPatch();
 
   const workerThreads = require("node:worker_threads") as typeof import("node:worker_threads");

@@ -1,6 +1,7 @@
 import { mock } from "bun:test";
 import { EventEmitter } from "node:events";
 import path from "node:path";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 declare global {
   var __bunTestCloudflareNativeWebSocket: typeof WebSocket | undefined;
@@ -72,6 +73,10 @@ export const installWebsocketPatch = () => {
     WebSocketServer: ws.WebSocketServer,
   });
 
-  mock.module("ws", () => wsModule);
-  globalThis.WebSocket = WebSocketCompat as unknown as typeof globalThis.WebSocket;
+  if (shouldInstallCompatibilityPatch("websocket-module")) {
+    mock.module("ws", () => wsModule);
+  }
+  if (shouldInstallCompatibilityPatch("websocket-global")) {
+    globalThis.WebSocket = WebSocketCompat as unknown as typeof globalThis.WebSocket;
+  }
 };

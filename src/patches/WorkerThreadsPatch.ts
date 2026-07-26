@@ -1,11 +1,19 @@
 import { mock } from "bun:test";
 import type * as WorkerThreads from "node:worker_threads";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 const synchronousFetcherMessageHandlerStart = `port.addEventListener("message", async (event) => {`;
 const synchronousFetcherMessageHandlerEnd = `\n\nport.start();`;
 const synchronousFetcherRequiredCode = `headers["${"MF-Op-Sync"}"] = "true";`;
 
-const synchronousFetcherPatchedMessageHandler = `let nextMessage = Promise.resolve();
+type WorkerThreadsPatchOptions = {
+  fifo: boolean;
+  streamBridge: boolean;
+  noTimeouts: boolean;
+};
+
+const getSynchronousFetcherPatchedMessageHandler = ({ fifo, streamBridge, noTimeouts }: WorkerThreadsPatchOptions) => `
+${fifo ? "let nextMessage = Promise.resolve();" : ""}
 
 const serialiseError = (error) => ({
   message: error instanceof Error ? error.message : String(error),
@@ -20,7 +28,9 @@ const transferChunk = (chunk) => {
   return new Uint8Array(chunk);
 };
 
-const createStreamBridge = (stream) => {
+${
+  streamBridge
+    ? `const createStreamBridge = (stream) => {
   const { MessageChannel } = require("worker_threads");
   const { port1, port2 } = new MessageChannel();
   const reader = stream.getReader();
@@ -44,7 +54,9 @@ const createStreamBridge = (stream) => {
   })();
 
   return { body: { __bunTestCloudflareStreamPort: port1 }, transferList: [port1] };
-};
+};`
+    : ""
+}
 
 const handleMessage = async (event) => {
   const { id, method, url, headers, body } = event.data;
@@ -53,22 +65,24 @@ const handleMessage = async (event) => {
       dispatcherUrl = url;
       dispatcher = new Pool(new URL(url).origin, {
         connect: { rejectUnauthorized: false },
-              // Disable timeouts for local dev — long-running responses (streaming,
-      // slow uploads, long-polling) should not be killed by undici defaults.
-      headersTimeout: 0,
-      bodyTimeout: 0,
+        ${noTimeouts ? "headersTimeout: 0,\n        bodyTimeout: 0," : ""}
       });
     }
     headers["${"MF-Op-Sync"}"] = "true";
     // body cannot be a ReadableStream, so no need to specify duplex
     const response = await fetch(url, { method, headers, body, dispatcher });
-    const isStreamResponse = response.headers.get("${"MF-Op-Result-Type"}") === "ReadableStream";
+    ${
+      streamBridge
+        ? `const isStreamResponse = response.headers.get("${"MF-Op-Result-Type"}") === "ReadableStream";
     const { body: responseBody, transferList } = isStreamResponse && response.body
       ? createStreamBridge(response.body)
       : await (async () => {
           const body = await response.arrayBuffer();
           return { body, transferList: body === null ? undefined : [body] };
-        })();
+        })();`
+        : `const responseBody = await response.arrayBuffer();
+    const transferList = responseBody === null ? undefined : [responseBody];`
+    }
     port.postMessage(
       {
         id,
@@ -93,13 +107,24 @@ const handleMessage = async (event) => {
   }
 };
 
-port.addEventListener("message", (event) => {
+${
+  fifo
+    ? `port.addEventListener("message", (event) => {
   nextMessage = nextMessage.then(() => handleMessage(event), () => handleMessage(event));
-});
+});`
+    : 'port.addEventListener("message", handleMessage);'
+}
 
 port.start();`;
 
-export const patchSynchronousFetcherWorkerScript = (script: string) => {
+export const patchSynchronousFetcherWorkerScript = (
+  script: string,
+  options: WorkerThreadsPatchOptions = {
+    fifo: true,
+    streamBridge: true,
+    noTimeouts: true,
+  },
+) => {
   const startIndex = script.indexOf(synchronousFetcherMessageHandlerStart);
   if (startIndex < 0 || !script.includes(synchronousFetcherRequiredCode)) {
     return script;
@@ -116,12 +141,17 @@ export const patchSynchronousFetcherWorkerScript = (script: string) => {
   // Bun also cannot transfer the live response ReadableStream here, so proxy
   // stream chunks over a MessagePort and reconstruct the stream in
   // receiveMessageOnPort() below.
-  return `${script.slice(0, startIndex)}${synchronousFetcherPatchedMessageHandler}${script.slice(
+  return `${script.slice(0, startIndex)}${getSynchronousFetcherPatchedMessageHandler(options)}${script.slice(
     endIndex + synchronousFetcherMessageHandlerEnd.length,
   )}`;
 };
 
 export const installWorkerThreadsPatch = () => {
+  const patchOptions = {
+    fifo: shouldInstallCompatibilityPatch("worker-threads-fifo"),
+    streamBridge: shouldInstallCompatibilityPatch("worker-threads-stream-bridge"),
+    noTimeouts: shouldInstallCompatibilityPatch("worker-threads-no-timeouts"),
+  };
   const workerThreads = require("node:worker_threads") as typeof WorkerThreads;
   type PortMessage = NonNullable<ReturnType<typeof workerThreads.receiveMessageOnPort>>;
 
@@ -147,6 +177,10 @@ export const installWorkerThreadsPatch = () => {
   };
 
   const normalizeMessage = (message: PortMessage | undefined) => {
+    if (!patchOptions.streamBridge) {
+      return message;
+    }
+
     const response = message?.message?.response;
     if (!response) {
       return message;
@@ -193,33 +227,37 @@ export const installWorkerThreadsPatch = () => {
   class WorkerThreadsCompatWorker extends workerThreads.Worker {
     constructor(filename: string | URL, options?: WorkerThreads.WorkerOptions) {
       super(
-        typeof filename === "string" && options?.eval ? patchSynchronousFetcherWorkerScript(filename) : filename,
+        typeof filename === "string" && options?.eval
+          ? patchSynchronousFetcherWorkerScript(filename, patchOptions)
+          : filename,
         options,
       );
     }
   }
 
-  const originalMessagePortPostMessage = workerThreads.MessagePort.prototype.postMessage;
-  workerThreads.MessagePort.prototype.postMessage = function bunTestCloudflarePostMessage(
-    this: WorkerThreads.MessagePort,
-    ...args: Parameters<WorkerThreads.MessagePort["postMessage"]>
-  ) {
-    const [value] = args;
-    if (
-      typeof value?.id === "number" &&
-      typeof value?.url === "string" &&
-      typeof value?.method === "string" &&
-      value?.headers &&
-      typeof value.headers === "object"
+  if (patchOptions.fifo) {
+    const originalMessagePortPostMessage = workerThreads.MessagePort.prototype.postMessage;
+    workerThreads.MessagePort.prototype.postMessage = function bunTestCloudflarePostMessage(
+      this: WorkerThreads.MessagePort,
+      ...args: Parameters<WorkerThreads.MessagePort["postMessage"]>
     ) {
-      expectedPortMessageIds.set(this, value.id);
-    }
-    return originalMessagePortPostMessage.apply(this, args as any);
-  } as WorkerThreads.MessagePort["postMessage"];
+      const [value] = args;
+      if (
+        typeof value?.id === "number" &&
+        typeof value?.url === "string" &&
+        typeof value?.method === "string" &&
+        value?.headers &&
+        typeof value.headers === "object"
+      ) {
+        expectedPortMessageIds.set(this, value.id);
+      }
+      return originalMessagePortPostMessage.apply(this, args as any);
+    } as WorkerThreads.MessagePort["postMessage"];
+  }
 
   const originalReceiveMessageOnPort = workerThreads.receiveMessageOnPort;
   const receiveMessageOnPort = (port: WorkerThreads.MessagePort) => {
-    const expectedId = expectedPortMessageIds.get(port);
+    const expectedId = patchOptions.fifo ? expectedPortMessageIds.get(port) : undefined;
     if (expectedId !== undefined) {
       const bufferedMessages = getBufferedMessages(port);
       const bufferedMessage = bufferedMessages.get(expectedId);

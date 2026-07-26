@@ -1,7 +1,12 @@
 import { mock } from "bun:test";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 import { trackPlatformProxyDispatch } from "../wranglerPatches";
 
 export const installMiniflarePatch = () => {
+  if (!shouldInstallCompatibilityPatch("miniflare-platform-proxy-dispatch")) {
+    return;
+  }
+
   const miniflare = require("miniflare");
   const OriginalMiniflare = miniflare.Miniflare;
 

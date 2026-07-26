@@ -125,6 +125,31 @@ const sleepSync = (durationMs: number) => {
 const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => error instanceof Error && "code" in error;
 const buildWaitTimeoutMs = Number(process.env.BUN_TEST_CLOUDFLARE_BUILD_WAIT_TIMEOUT_MS ?? 120_000);
 
+const isProcessAlive = (processId: number) => {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    return isErrnoException(error) && error.code === "EPERM";
+  }
+};
+
+export const removeStaleBuildLock = (lockPath: string) => {
+  try {
+    const ownerProcessId = Number(readFileSync(lockPath, "utf8").trim());
+    if (!Number.isSafeInteger(ownerProcessId) || ownerProcessId <= 0 || isProcessAlive(ownerProcessId)) {
+      return false;
+    }
+    unlinkSync(lockPath);
+    return true;
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return true;
+    }
+    return false;
+  }
+};
+
 type WorkerBuildStatus =
   | {
       buildKey: string;
@@ -230,6 +255,9 @@ const withBuildLock = <TResult>(outdir: string, callback: () => TResult) => {
     } catch (error) {
       if (!isErrnoException(error) || error.code !== "EEXIST") {
         throw error;
+      }
+      if (removeStaleBuildLock(lockPath)) {
+        continue;
       }
       if (Date.now() - start > buildWaitTimeoutMs) {
         throw new Error(`Timed out waiting for worker build lock: ${lockPath}`);

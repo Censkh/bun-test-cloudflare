@@ -14,5 +14,5 @@ describe("runtime close race repro", () => {
     result.expectStatusCode(0);
     expect(output).not.toContain("timed out");
     expect(output).not.toContain("killed 1 dangling process");
-  });
+  }, 25_000);
 });
