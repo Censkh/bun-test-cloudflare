@@ -4,6 +4,17 @@ import path from "node:path";
 
 export const fixturePath = (testDir: string, fixtureName: string) => path.join(testDir, "fixtures", fixtureName);
 
+const packageRoot = path.resolve(import.meta.dir, "..");
+
+const linkFixturePackage = (fixtureRoot: string) => {
+  const nodeModulesPath = path.join(fixtureRoot, "node_modules");
+  const packageLinkPath = path.join(nodeModulesPath, "bun-test-cloudflare");
+  if (fs.existsSync(packageLinkPath)) return;
+
+  fs.mkdirSync(nodeModulesPath, { recursive: true });
+  fs.symlinkSync(packageRoot, packageLinkPath, "dir");
+};
+
 const findFixtureTests = (fixtureRoot: string): string[] => {
   const fixtureTests: string[] = [];
   const visit = (directory: string) => {
@@ -109,6 +120,8 @@ export const runBunFixture = (
       stdout: "",
     });
   }
+
+  linkFixturePackage(fixtureRoot);
 
   const result = Bun.spawnSync({
     cmd: [

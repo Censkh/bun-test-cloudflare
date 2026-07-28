@@ -24,6 +24,5 @@ jobs:
         with:
           bun-version: ${{ matrix.bun-version }}
       - run: bun install
-      - run: bun x @biomejs/biome rage
       - run: bun run check
       - run: bun run test
