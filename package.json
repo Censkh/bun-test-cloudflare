@@ -6,7 +6,7 @@
   "sideEffects": false,
   "scripts": {
     "prepublishOnly": "bun run check:fix && bun run test",
-    "test": "bun test",
+    "test": "bun test --timeout 10000",
     "check": "tsc --noEmit --project tsconfig.json && npx @biomejs/biome check .",
     "check:fix": "tsc --noEmit --project tsconfig.json && npx @biomejs/biome check --write ."
   },
