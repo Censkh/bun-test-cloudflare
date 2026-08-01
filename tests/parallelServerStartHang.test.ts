@@ -6,6 +6,7 @@ const fixtureRoot = fixturePath(import.meta.dir, "parallel-server-start-hang");
 describe("parallel server start hang repro", () => {
   test("starts and closes many harness runs across parallel Bun workers", () => {
     const result = runBunFixture(fixtureRoot, {
+      installMode: "full",
       testArgs: ["--parallel=6", "--parallel-delay=0"],
       timeoutMs: 30_000,
     });

@@ -9,9 +9,9 @@ const isWorkerdServe = (command: string, args?: readonly string[]) => {
   return path.basename(command).includes("workerd") && args?.includes("serve");
 };
 
-const unrefChildProcess = (child: childProcess.ChildProcess) => {
+export const unrefWorkerdChildProcess = (child: childProcess.ChildProcess) => {
   child.unref();
-  for (const stream of child.stdio ?? []) {
+  for (const stream of child.stdio.slice(0, 3)) {
     (stream as UnrefableStream | null)?.unref?.();
   }
 };
@@ -32,7 +32,7 @@ export const installWorkerdChildProcessPatch = () => {
     const child = originalSpawn.call(this as any, command, args as string[], options as any);
 
     if (isWorkerdServe(command, args)) {
-      unrefChildProcess(child);
+      unrefWorkerdChildProcess(child);
     }
 
     return child;

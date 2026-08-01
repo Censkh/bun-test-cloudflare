@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
-import { createRequire } from "node:module";
 
 await import("../src/setup");
-
-const require = createRequire(import.meta.url);
 
 test("setup exposes ws client and server constructors", () => {
   const ws = require("ws");

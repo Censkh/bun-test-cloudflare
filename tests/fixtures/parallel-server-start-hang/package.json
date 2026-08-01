@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "devDependencies": {
+    "api-def": "0.15.0",
     "typescript": "7.0.1-rc",
     "wrangler": "4.105.0"
   }

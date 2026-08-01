@@ -23,7 +23,7 @@ declare global {
   var __bunTestCloudflareGuessWorkerFormatPatched: boolean | undefined;
 }
 
-const localRequire = createRequire(import.meta.url);
+const localRequire = require;
 const requireFromWrangler = createRequire(localRequire.resolve("wrangler"));
 
 const getSingleEntryPoint = (options: BuildOptions) => {

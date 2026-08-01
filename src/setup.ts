@@ -1,5 +1,6 @@
 import { afterAll } from "bun:test";
 import { installGlobalCachesBridge } from "./CacheBridge";
+import { type CompatibilityPatchName, shouldInstallCompatibilityPatch } from "./CompatibilityPatches";
 import { closePrewarmedServerOrchestrators } from "./PrewarmedServerOrchestrator";
 import { installBrowserRenderingPatch } from "./patches/BrowserRenderingPatch";
 import { installChildProcessExtraFdPatch } from "./patches/ChildProcessExtraFdPatch";
@@ -14,19 +15,25 @@ import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPa
 import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
 import { installWranglerGuessWorkerFormatPatch } from "./patches/WranglerGuessWorkerFormatPatch";
 
-installWebStreamPatch();
-installGlobalCachesBridge();
-installChildProcessExtraFdPatch();
-installWorkerdChildProcessPatch();
-installBrowserRenderingPatch();
-installUndiciPatch();
-installWebsocketPatch();
-installWorkerThreadsPatch();
-installMiniflareWebGlobalsPatch();
-installWranglerGuessWorkerFormatPatch();
-installMiniflareLoopbackPatch();
-installMiniflarePatch();
-installCloudflareWorkersPatch();
+const installCompatibilityPatch = (patchName: CompatibilityPatchName, install: () => void) => {
+  if (shouldInstallCompatibilityPatch(patchName)) {
+    install();
+  }
+};
+
+installCompatibilityPatch("web-streams", installWebStreamPatch);
+installCompatibilityPatch("global-caches", installGlobalCachesBridge);
+installCompatibilityPatch("child-process-extra-fd", installChildProcessExtraFdPatch);
+installCompatibilityPatch("workerd-child-process", installWorkerdChildProcessPatch);
+installCompatibilityPatch("browser-rendering", installBrowserRenderingPatch);
+installCompatibilityPatch("undici", installUndiciPatch);
+installCompatibilityPatch("websocket", installWebsocketPatch);
+installCompatibilityPatch("worker-threads", installWorkerThreadsPatch);
+installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
+installCompatibilityPatch("wrangler-guess-worker-format", installWranglerGuessWorkerFormatPatch);
+installCompatibilityPatch("miniflare-loopback", installMiniflareLoopbackPatch);
+installCompatibilityPatch("miniflare", installMiniflarePatch);
+installCompatibilityPatch("cloudflare-workers", installCloudflareWorkersPatch);
 
 afterAll(async () => {
   await closePrewarmedServerOrchestrators();

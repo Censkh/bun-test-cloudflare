@@ -1,4 +1,5 @@
 import http from "node:http";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 import { trackBrowserRenderingLaunchRequest } from "./BrowserRenderingPatch";
 
 const pendingLoopbackRequests = new Set<Promise<void>>();
@@ -51,9 +52,9 @@ export const installMiniflareLoopbackPatch = () => {
 
     const wrappedListener: typeof listener = (request: http.IncomingMessage, response: http.ServerResponse) => {
       const pathname = getMiniflareInternalLoopbackPathname(request);
-      if (pathname === "/browser/launch") {
+      if (pathname === "/browser/launch" && shouldInstallCompatibilityPatch("miniflare-loopback-launch")) {
         trackBrowserRenderingLaunchRequest(response);
-      } else if (pathname === "/browser/close") {
+      } else if (pathname === "/browser/close" && shouldInstallCompatibilityPatch("miniflare-loopback-close")) {
         // Miniflare's Browser Rendering binding fires this loopback fetch without
         // awaiting it. Draining the response avoids closing the harness while
         // Miniflare still has the browser session registered.

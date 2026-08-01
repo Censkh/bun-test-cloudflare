@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createRequire } from "node:module";
+import { shouldInstallCompatibilityPatch } from "./CompatibilityPatches";
 
 export type CapturedDevEnv = {
   config?: {
@@ -61,13 +61,20 @@ const isPlatformProxyFetch = (input: unknown) => {
           : input instanceof Request
             ? new URL(input.url)
             : undefined;
-    return url?.pathname === "/cdn-cgi/platform-proxy";
+    return (
+      url?.pathname === "/cdn-cgi/platform-proxy" ||
+      url?.pathname.startsWith("/cdn-cgi/ProxyWorker/") ||
+      url?.pathname.startsWith("/cdn-cgi/ProxyWorker")
+    );
   } catch {
     return false;
   }
 };
 
 const trackResponseBody = (response: Response, tracker: AsyncOperationTracker) => {
+  if (!shouldInstallCompatibilityPatch("platform-proxy-response-drain")) {
+    return response;
+  }
   if (!response.body) {
     return response;
   }
@@ -89,7 +96,6 @@ export const trackPlatformProxyDispatch = (input: unknown, promise: Promise<Resp
 };
 
 const installDevEnvCapture = () => {
-  const require = createRequire(import.meta.url);
   const wranglerModule = require("wrangler") as WranglerModuleWithDevEnv;
   const OriginalDevEnv = wranglerModule.unstable_DevEnv;
   if (!OriginalDevEnv) {
@@ -105,8 +111,12 @@ const installDevEnvCapture = () => {
     wranglerModule.unstable_DevEnv = class BunTestCloudflareCapturedDevEnv extends OriginalDevEnv {
       constructor(...args: any[]) {
         super(...args);
-        this.#installConfigPatch();
-        devEnvCaptureContext.getStore()?.push(this);
+        if (shouldInstallCompatibilityPatch("wrangler-dev-env-force-local")) {
+          this.#installConfigPatch();
+        }
+        if (shouldInstallCompatibilityPatch("wrangler-dev-env-capture")) {
+          devEnvCaptureContext.getStore()?.push(this);
+        }
       }
 
       #installConfigPatch() {
@@ -133,7 +143,9 @@ const installDevEnvCapture = () => {
 };
 
 export const installWranglerPatches = () => {
-  installDevEnvCapture();
+  if (shouldInstallCompatibilityPatch("wrangler-dev-env")) {
+    installDevEnvCapture();
+  }
 };
 
 export const drainDevEnvRuntimeMessages = async (devEnvs: CapturedDevEnv[]) => {

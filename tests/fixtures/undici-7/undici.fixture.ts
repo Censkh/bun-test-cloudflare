@@ -1,7 +1,4 @@
 import { expect, test } from "bun:test";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
 
 test("bun-test-cloudflare setup can load Undici 7", () => {
   const packageJson = require("undici/package.json");

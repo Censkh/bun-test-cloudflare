@@ -1,5 +1,6 @@
 import childProcess from "node:child_process";
 import type http from "node:http";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 const browserRenderingProfilePathPattern = /[/\\]miniflare-[^/\\]+[/\\]browser-rendering[/\\]profile-/;
 const devtoolsEndpointPattern = /DevTools listening on ws:\/\//;
@@ -111,7 +112,7 @@ export const installBrowserRenderingPatch = () => {
     // the DevTools endpoint. If a test closes the harness while Chrome is still
     // starting, Miniflare can delete the temp profile directory underneath it,
     // which surfaces as Chromium's "SingletonLock: No such file or directory".
-    if (isBrowserRenderingLaunch(command, args)) {
+    if (shouldInstallCompatibilityPatch("browser-rendering-spawn") && isBrowserRenderingLaunch(command, args)) {
       trackBrowserLaunch(child);
     }
 
