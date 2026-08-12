@@ -27,6 +27,8 @@ const createdServers: FakeServer[] = [];
 const lifecycleEvents: string[] = [];
 let lastOptions: unknown;
 const spawnedCommands: string[][] = [];
+const spawnedTimeouts: Array<number | undefined> = [];
+let timedOutWranglerBuildsRemaining = 0;
 const testRoot = await mkdtemp(path.join(os.tmpdir(), "bun-test-cloudflare-harness-"));
 const originalSpawn = Bun.spawn;
 const originalSpawnSync = Bun.spawnSync;
@@ -88,7 +90,6 @@ const createFakeServer = (): FakeServer => ({
 mock.module("wrangler", () => wranglerMock);
 
 const runFakeWranglerBuild = (command: string[]) => {
-  spawnedCommands.push(command);
   const outdir = command[command.indexOf("--outdir") + 1];
   const configPath = command[command.indexOf("--config") + 1];
   const builtFile = configPath.includes("cms") ? "cms.js" : "backend.js";
@@ -97,7 +98,18 @@ const runFakeWranglerBuild = (command: string[]) => {
   writeFileSync(path.join(outdir, builtFile), "export default {};");
 };
 
-Bun.spawnSync = ((options: { cmd: string[] }) => {
+Bun.spawnSync = ((options: { cmd: string[]; timeout?: number }) => {
+  spawnedCommands.push(options.cmd);
+  spawnedTimeouts.push(options.timeout);
+  if (options.cmd.includes("deploy") && options.cmd.includes("--dry-run") && timedOutWranglerBuildsRemaining > 0) {
+    timedOutWranglerBuildsRemaining -= 1;
+    return {
+      exitCode: null,
+      signalCode: "SIGTERM",
+      stderr: Buffer.from(""),
+      stdout: Buffer.from(""),
+    };
+  }
   runFakeWranglerBuild(options.cmd);
   return {
     exitCode: 0,
@@ -107,6 +119,7 @@ Bun.spawnSync = ((options: { cmd: string[] }) => {
 }) as typeof Bun.spawnSync;
 
 Bun.spawn = ((command: string[]) => {
+  spawnedCommands.push(command);
   runFakeWranglerBuild(command);
   return {
     exited: (async () => {
@@ -243,6 +256,32 @@ test("prebuilds inline worker configs with the same test transform", async () =>
   expect(spawnedCommands.at(-1)).toContain(
     path.join(testRoot, "node_modules/.btcf/worker-build/inline-backend/wrangler.json"),
   );
+});
+
+test("retries a timed-out Wrangler dry-run build", async () => {
+  const commandStart = spawnedCommands.length;
+  const timeoutStart = spawnedTimeouts.length;
+  timedOutWranglerBuildsRemaining = 1;
+
+  const harness = createCloudflareHarness({
+    root: testRoot,
+    workers: {
+      BACKEND: {
+        config: {
+          compatibility_date: "2025-08-15",
+          main: "src/backend.ts",
+          name: "retry-backend",
+        },
+      },
+    },
+  });
+
+  await harness.run(() => {});
+
+  const retryCommands = spawnedCommands.slice(commandStart);
+  expect(retryCommands).toHaveLength(2);
+  expect(retryCommands.every((command) => command.includes("--dry-run"))).toBe(true);
+  expect(spawnedTimeouts.slice(timeoutStart)).toEqual([10_000, 10_000]);
 });
 
 test("copies explicit additional modules without recursively copying harness build output", async () => {

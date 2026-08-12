@@ -123,7 +123,31 @@ const sleepSync = (durationMs: number) => {
 };
 
 const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => error instanceof Error && "code" in error;
-const buildWaitTimeoutMs = Number(process.env.BUN_TEST_CLOUDFLARE_BUILD_WAIT_TIMEOUT_MS ?? 120_000);
+
+const getPositiveIntegerEnvironmentVariable = (name: string, fallback: number) => {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+};
+
+const getNonNegativeIntegerEnvironmentVariable = (name: string, fallback: number) => {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+};
+
+const buildInitializationTimeoutMs = getPositiveIntegerEnvironmentVariable(
+  "BUN_TEST_CLOUDFLARE_BUILD_TIMEOUT_MS",
+  30_000,
+);
+const buildOperationTimeoutMs = getPositiveIntegerEnvironmentVariable(
+  "BUN_TEST_CLOUDFLARE_BUILD_OPERATION_TIMEOUT_MS",
+  10_000,
+);
+const buildRetryCount = getNonNegativeIntegerEnvironmentVariable("BUN_TEST_CLOUDFLARE_BUILD_RETRY_COUNT", 1);
+const buildRetryDelayMs = getPositiveIntegerEnvironmentVariable("BUN_TEST_CLOUDFLARE_BUILD_RETRY_DELAY_MS", 250);
+
+const getRemainingBuildTimeMs = (deadline: number) => Math.max(0, deadline - Date.now());
+const getBuildOperationTimeoutMs = (deadline: number) =>
+  Math.min(buildOperationTimeoutMs, getRemainingBuildTimeMs(deadline));
 
 const isProcessAlive = (processId: number) => {
   try {
@@ -223,9 +247,13 @@ const throwBuildFailure = (status: Extract<WorkerBuildStatus, { state: "failure"
   throw error;
 };
 
-const waitForWorkerBuild = (statusPath: string, buildKey: string, outdir: string): WorkerBuildResult => {
-  const start = Date.now();
-  while (Date.now() - start <= buildWaitTimeoutMs) {
+const waitForWorkerBuild = (
+  statusPath: string,
+  buildKey: string,
+  outdir: string,
+  deadline: number,
+): WorkerBuildResult => {
+  while (getRemainingBuildTimeMs(deadline) > 0) {
     const status = readBuildStatus(statusPath);
     if (status?.buildKey === buildKey) {
       if (status.state === "success" && existsSync(status.builtMain)) {
@@ -238,32 +266,39 @@ const waitForWorkerBuild = (statusPath: string, buildKey: string, outdir: string
     sleepSync(50);
   }
 
-  throw new Error(`Timed out waiting for worker build: ${outdir}`);
+  throw new Error(`Timed out waiting for worker build status after ${buildInitializationTimeoutMs}ms: ${outdir}`);
 };
 
-const withBuildLock = <TResult>(outdir: string, callback: () => TResult) => {
+const withBuildLock = <TResult>(outdir: string, deadline: number, callback: () => TResult) => {
   const lockPath = `${outdir}.lock`;
   mkdirSync(path.dirname(lockPath), { recursive: true });
 
-  const start = Date.now();
   let lockFile: number | undefined;
-  while (lockFile === undefined) {
-    try {
-      lockFile = openSync(lockPath, "wx");
-      writeFileSync(lockFile, `${process.pid}\n`);
-      closeSync(lockFile);
-    } catch (error) {
-      if (!isErrnoException(error) || error.code !== "EEXIST") {
-        throw error;
+  for (let attempt = 0; lockFile === undefined && attempt <= buildRetryCount; attempt++) {
+    const attemptDeadline = Date.now() + getBuildOperationTimeoutMs(deadline);
+    while (lockFile === undefined && getRemainingBuildTimeMs(attemptDeadline) > 0) {
+      try {
+        lockFile = openSync(lockPath, "wx");
+        writeFileSync(lockFile, `${process.pid}\n`);
+        closeSync(lockFile);
+      } catch (error) {
+        if (!isErrnoException(error) || error.code !== "EEXIST") {
+          throw error;
+        }
+        if (removeStaleBuildLock(lockPath)) {
+          continue;
+        }
+        sleepSync(50);
       }
-      if (removeStaleBuildLock(lockPath)) {
-        continue;
-      }
-      if (Date.now() - start > buildWaitTimeoutMs) {
-        throw new Error(`Timed out waiting for worker build lock: ${lockPath}`);
-      }
-      sleepSync(50);
     }
+
+    if (lockFile === undefined && attempt < buildRetryCount && getRemainingBuildTimeMs(deadline) > 0) {
+      sleepSync(Math.min(buildRetryDelayMs, getRemainingBuildTimeMs(deadline)));
+    }
+  }
+
+  if (lockFile === undefined) {
+    throw new Error(`Timed out waiting for worker build lock after ${buildInitializationTimeoutMs}ms: ${lockPath}`);
   }
 
   const releaseLock = () => {
@@ -286,7 +321,7 @@ const withBuildLock = <TResult>(outdir: string, callback: () => TResult) => {
   }
 };
 
-const runWranglerDryRun = (configPath: string, outdir: string, env: string | undefined) => {
+const runWranglerDryRun = (configPath: string, outdir: string, env: string | undefined, deadline: number) => {
   mkdirSync(outdir, { recursive: true });
   const wranglerBinPath = getWranglerBinPath();
   const args = [wranglerBinPath, "deploy", "--dry-run", "--outdir", outdir, "--config", configPath];
@@ -294,18 +329,36 @@ const runWranglerDryRun = (configPath: string, outdir: string, env: string | und
     args.push("--env", env);
   }
 
-  const result = Bun.spawnSync({
-    cmd: [process.execPath, ...getWranglerPreloadArgs(), ...args],
-    stderr: "pipe",
-    stdout: "pipe",
-  });
-  const stdout = result.stdout.toString();
-  const stderr = result.stderr.toString();
+  for (let attempt = 0; attempt <= buildRetryCount; attempt++) {
+    const timeout = getBuildOperationTimeoutMs(deadline);
+    if (timeout <= 0) {
+      break;
+    }
 
-  if (result.exitCode !== 0) {
+    const result = Bun.spawnSync({
+      cmd: [process.execPath, ...getWranglerPreloadArgs(), ...args],
+      stderr: "pipe",
+      stdout: "pipe",
+      timeout,
+    });
+    const stdout = result.stdout.toString();
+    const stderr = result.stderr.toString();
+
+    if (result.exitCode === 0) {
+      return;
+    }
+
+    const timedOut = result.signalCode === "SIGTERM";
+    if (timedOut && attempt < buildRetryCount && getRemainingBuildTimeMs(deadline) > 0) {
+      sleepSync(Math.min(buildRetryDelayMs, getRemainingBuildTimeMs(deadline)));
+      continue;
+    }
+
     throw new Error(
       [
-        `wrangler deploy --dry-run failed for ${configPath}`,
+        timedOut
+          ? `wrangler deploy --dry-run timed out after ${timeout}ms for ${configPath}`
+          : `wrangler deploy --dry-run failed for ${configPath}`,
         stdout.trim() ? `stdout:\n${stdout.trim()}` : undefined,
         stderr.trim() ? `stderr:\n${stderr.trim()}` : undefined,
       ]
@@ -313,6 +366,8 @@ const runWranglerDryRun = (configPath: string, outdir: string, env: string | und
         .join("\n\n"),
     );
   }
+
+  throw new Error(`wrangler deploy --dry-run timed out after ${buildInitializationTimeoutMs}ms for ${configPath}`);
 };
 
 const createWorkerBuildPlan = (
@@ -400,11 +455,12 @@ const copyAdditionalModules = (plan: WorkerBuildPlan) => {
 };
 
 const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
+  const deadline = Date.now() + buildInitializationTimeoutMs;
   if (!isWorkerBuildOwner()) {
-    return waitForWorkerBuild(plan.statusPath, plan.buildKey, plan.outdir);
+    return waitForWorkerBuild(plan.statusPath, plan.buildKey, plan.outdir, deadline);
   }
 
-  return withBuildLock(plan.outdir, () => {
+  return withBuildLock(plan.outdir, deadline, () => {
     const existingStatus = readBuildStatus(plan.statusPath);
     if (existingStatus?.buildKey === plan.buildKey) {
       if (existingStatus.state === "success" && existsSync(existingStatus.builtMain)) {
@@ -418,7 +474,7 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
       const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
-      runWranglerDryRun(testConfigPath, plan.outdir, plan.env);
+      runWranglerDryRun(testConfigPath, plan.outdir, plan.env, deadline);
       const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
       copyAdditionalModules(plan);
       writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, builtMain, state: "success" });
