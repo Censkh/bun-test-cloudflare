@@ -1,4 +1,5 @@
 import type { HarnessRun } from "./HarnessRun";
+import { stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
 export const WARM_WORKERD_POOL_SIZE = 2;
@@ -75,8 +76,12 @@ export const closePrewarmedServerOrchestrators = async () => {
   }
 
   registry.closing = true;
-  await Promise.allSettled(Array.from(registry.orchestrators, (orchestrator) => orchestrator.close()));
-  registry.closing = false;
+  try {
+    await Promise.allSettled(Array.from(registry.orchestrators, (orchestrator) => orchestrator.close()));
+  } finally {
+    registry.closing = false;
+    stopWranglerEsbuildService();
+  }
 };
 
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {

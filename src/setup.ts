@@ -13,7 +13,10 @@ import { installWebStreamPatch } from "./patches/WebStreamPatch";
 import { installWebsocketPatch } from "./patches/WebsocketPatch";
 import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
 import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
-import { installWranglerGuessWorkerFormatPatch } from "./patches/WranglerGuessWorkerFormatPatch";
+import {
+  installWranglerGuessWorkerFormatPatch,
+  stopWranglerEsbuildService,
+} from "./patches/WranglerGuessWorkerFormatPatch";
 
 const installCompatibilityPatch = (patchName: CompatibilityPatchName, install: () => void) => {
   if (shouldInstallCompatibilityPatch(patchName)) {
@@ -36,5 +39,9 @@ installCompatibilityPatch("miniflare", installMiniflarePatch);
 installCompatibilityPatch("cloudflare-workers", installCloudflareWorkersPatch);
 
 afterAll(async () => {
-  await closePrewarmedServerOrchestrators();
+  try {
+    await closePrewarmedServerOrchestrators();
+  } finally {
+    stopWranglerEsbuildService();
+  }
 });

@@ -1,0 +1,3 @@
+name = "esbuild-service-cleanup-first"
+main = "src/first.ts"
+compatibility_date = "2025-08-15"

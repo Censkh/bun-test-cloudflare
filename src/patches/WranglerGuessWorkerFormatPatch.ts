@@ -15,6 +15,7 @@ type BuildResult = unknown;
 
 type EsbuildModule = {
   build(options: BuildOptions): Promise<BuildResult>;
+  stop?: () => void;
   [key: PropertyKey]: unknown;
 };
 
@@ -99,4 +100,10 @@ export const installWranglerGuessWorkerFormatPatch = () => {
   const patchedEsbuild = createPatchedEsbuild(esbuild);
   mock.module("esbuild", () => patchedEsbuild);
   globalThis.__bunTestCloudflareGuessWorkerFormatPatched = true;
+};
+
+export const stopWranglerEsbuildService = () => {
+  const esbuild = requireFromWrangler("esbuild") as EsbuildModule;
+  esbuild.stop?.();
+  globalThis.__bunTestCloudflareGuessWorkerFormatBuildCache?.clear();
 };
