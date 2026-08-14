@@ -28,16 +28,9 @@ const waitForStartedRun = () => {
   return started;
 };
 
-if (process.env.BUN_TEST_CLOUDFLARE_TIMEOUT_REPRO) {
-  test("intentional timeout while Wrangler is running", async () => {
-    await waitForStartedRun();
-    await new Promise(() => {});
-  }, 100);
-} else {
-  test("cleanup can close an abandoned Wrangler run", async () => {
-    await waitForStartedRun();
-  });
-}
+test("cleanup can close an abandoned Wrangler run", async () => {
+  await waitForStartedRun();
+});
 
 test("Wrangler can start again after the previous run was abandoned", async () => {
   await harness.run(async (workers) => {
