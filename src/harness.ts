@@ -492,12 +492,34 @@ const resolveInlineConfig = (
   };
 };
 
+const resolveConfigPaths = (config: Record<string, any>, configDirectory: string): Record<string, any> => {
+  const resolvePath = (value: unknown) =>
+    typeof value === "string" && !path.isAbsolute(value) ? path.resolve(configDirectory, value) : value;
+
+  return {
+    ...config,
+    ...(config.main ? { main: resolvePath(config.main) } : {}),
+    ...(config.tsconfig ? { tsconfig: resolvePath(config.tsconfig) } : {}),
+    ...(config.assets && typeof config.assets === "object" && config.assets.directory
+      ? {
+          assets: {
+            ...config.assets,
+            directory: resolvePath(config.assets.directory),
+          },
+        }
+      : {}),
+  };
+};
+
 const resolveWorkerConfig = (input: WorkerInput, root: string | undefined, fallbackWorkerName: string) => {
   if ("configPath" in input) {
     const { configPath, env } = input;
     const resolvedConfigPath = resolveConfigPath(configPath, root);
-    const config = unstable_readConfig({ config: resolvedConfigPath, ...(env ? { env } : {}) }, { hideWarnings: true });
     const configDirectory = path.dirname(resolvedConfigPath);
+    const config = resolveConfigPaths(
+      unstable_readConfig({ config: resolvedConfigPath, ...(env ? { env } : {}) }, { hideWarnings: true }),
+      configDirectory,
+    );
     return {
       additionalModuleSourceRoots: getAdditionalModuleSourceRoots(
         typeof config.base_dir === "string" ? resolveConfigPath(config.base_dir, configDirectory) : undefined,
@@ -525,7 +547,12 @@ const prepareWorkerInput = (
   const vars = "vars" in input ? input.vars : undefined;
   const secrets = "secrets" in input ? input.secrets : undefined;
   const env = "env" in input ? input.env : undefined;
-  const { additionalModuleSourceRoots, config, outdir } = resolveWorkerConfig(input, root, worker.name ?? key);
+  const {
+    additionalModuleSourceRoots,
+    config: resolvedConfig,
+    outdir,
+  } = resolveWorkerConfig(input, root, worker.name ?? key);
+  const config = resolvedConfig as Record<string, any>;
   const workerName = worker.name ?? config.name ?? key;
   const testConfig = withTestEnvironmentDefine(config);
   const buildPlan = createWorkerBuildPlan(workerName, outdir, testConfig, config, env, additionalModuleSourceRoots);

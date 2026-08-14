@@ -139,6 +139,33 @@ test("calls the backend worker", async () => {
 
 `run()` creates a fresh Wrangler test server, starts it before the callback, and always closes it afterwards, including when the callback throws.
 
+## OpenNext Applications
+
+Build the Next application with `opennextjs-cloudflare build` before creating the
+harness, then use the application's normal `wrangler.toml`. Relative worker and
+asset paths, including `.open-next/assets`, are resolved from that config file.
+
+```ts
+import { createCloudflareHarness } from "bun-test-cloudflare";
+import path from "node:path";
+
+const appRoot = path.resolve(import.meta.dir, "..");
+
+const harness = createCloudflareHarness({
+  workers: {
+    APP: {
+      configPath: path.join(appRoot, "wrangler.toml"),
+      name: "my-opennext-app",
+    },
+  },
+});
+
+await harness.run(async (workers) => {
+  const response = await workers.APP.fetch("https://example.test/");
+  expect(await response.text()).toContain("Expected rendered content");
+});
+```
+
 ## Lifecycle Events
 
 Use `events.beforeRun` for per-run setup after Wrangler has started and before the test callback runs:
