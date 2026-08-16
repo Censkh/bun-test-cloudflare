@@ -9,7 +9,7 @@ const DEFAULT_WARM_WORKERD_START_TIMEOUT_MS = 30_000;
 type PrewarmedServerOrchestratorRegistry = {
   closing: boolean;
   installed: boolean;
-  orchestrators: Set<PrewarmedServerOrchestrator<any>>;
+  orchestrators: Set<ServerOrchestrator<any>>;
 };
 
 type WarmHarnessRun<TWorkers extends Record<string, any>> = {
@@ -137,7 +137,22 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     return {
       run,
       release: async () => {
-        if (this.#inUse.delete(run)) {
+        if (!this.#inUse.delete(run)) {
+          return;
+        }
+
+        try {
+          await run.resetForReuse();
+        } catch (error) {
+          await run.close();
+          this.#fillWarmPool();
+          this.#scheduleIdleClose();
+          throw error;
+        }
+
+        if (!this.#closed && this.#available.length + this.#inUse.size < WARM_WORKERD_POOL_SIZE) {
+          this.#available.push({ run, started: Promise.resolve(run) });
+        } else {
           await run.close();
         }
         this.#fillWarmPool();
@@ -190,7 +205,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   #fillWarmPool() {
     if (this.#closed) return;
 
-    while (this.#available.length < WARM_WORKERD_POOL_SIZE) {
+    while (this.#available.length + this.#inUse.size < WARM_WORKERD_POOL_SIZE) {
       this.#available.push(this.#createStartedRun());
     }
   }
@@ -216,5 +231,69 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       await Promise.allSettled(availableRuns.map((warmRun) => this.#closeWarmRun(warmRun)));
     }, IDLE_WARM_WORKERD_POOL_CLOSE_DELAY_MS);
     this.#idleCloseTimer.unref?.();
+  }
+}
+
+export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
+  #closed = false;
+  #leaseTail = Promise.resolve();
+  #run: HarnessRun<TWorkers> | undefined;
+
+  constructor(private readonly createRun: () => HarnessRun<TWorkers>) {
+    getPrewarmedServerOrchestratorRegistry().orchestrators.add(this);
+  }
+
+  async acquire(): Promise<HarnessRunLease<TWorkers>> {
+    this.#assertOpen();
+
+    const previousLease = this.#leaseTail;
+    let releaseLease!: () => void;
+    this.#leaseTail = new Promise<void>((resolve) => {
+      releaseLease = resolve;
+    });
+    await previousLease;
+
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      releaseLease();
+    };
+
+    try {
+      this.#assertOpen();
+      const run = this.#run;
+      if (run) {
+        await run.resetForReuse();
+        await run.assertUsable();
+        return { run, release };
+      }
+
+      const createdRun = this.createRun();
+      this.#run = createdRun;
+      await createdRun.start();
+      await createdRun.assertUsable();
+      return { run: createdRun, release };
+    } catch (error) {
+      const run = this.#run;
+      this.#run = undefined;
+      await run?.close();
+      await release();
+      throw error;
+    }
+  }
+
+  async close() {
+    getPrewarmedServerOrchestratorRegistry().orchestrators.delete(this);
+    this.#closed = true;
+    const run = this.#run;
+    this.#run = undefined;
+    await run?.close();
+  }
+
+  #assertOpen() {
+    if (this.#closed) {
+      throw new Error("Cloudflare server orchestrator is closed");
+    }
   }
 }

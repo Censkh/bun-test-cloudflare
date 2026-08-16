@@ -208,14 +208,10 @@ type WorkerBuildPlan = {
   workerName: string;
 };
 
-const getBunTestWorkerId = () => process.env.BUN_TEST_WORKER_ID ?? process.env.JEST_WORKER_ID;
-
-const isWorkerBuildOwner = () => {
-  const workerId = getBunTestWorkerId();
-  return workerId === undefined || workerId === "1";
-};
-
-const getBunTestRunKey = () => (getBunTestWorkerId() === undefined ? String(process.pid) : String(process.ppid));
+const getBunTestRunKey = () =>
+  process.env.BUN_TEST_WORKER_ID === undefined && process.env.JEST_WORKER_ID === undefined
+    ? String(process.pid)
+    : String(process.ppid);
 
 const getBuildStatusPath = (outdir: string) => `${outdir}.build-${getBunTestRunKey()}.json`;
 
@@ -245,28 +241,6 @@ const throwBuildFailure = (status: Extract<WorkerBuildStatus, { state: "failure"
     error.stack = status.errorStack;
   }
   throw error;
-};
-
-const waitForWorkerBuild = (
-  statusPath: string,
-  buildKey: string,
-  outdir: string,
-  deadline: number,
-): WorkerBuildResult => {
-  while (getRemainingBuildTimeMs(deadline) > 0) {
-    const status = readBuildStatus(statusPath);
-    if (status?.buildKey === buildKey) {
-      if (status.state === "success" && existsSync(status.builtMain)) {
-        return { built: false, builtMain: status.builtMain };
-      }
-      if (status.state === "failure") {
-        throwBuildFailure(status);
-      }
-    }
-    sleepSync(50);
-  }
-
-  throw new Error(`Timed out waiting for worker build status after ${buildInitializationTimeoutMs}ms: ${outdir}`);
 };
 
 const withBuildLock = <TResult>(outdir: string, deadline: number, callback: () => TResult) => {
@@ -456,10 +430,6 @@ const copyAdditionalModules = (plan: WorkerBuildPlan) => {
 
 const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   const deadline = Date.now() + buildInitializationTimeoutMs;
-  if (!isWorkerBuildOwner()) {
-    return waitForWorkerBuild(plan.statusPath, plan.buildKey, plan.outdir, deadline);
-  }
-
   return withBuildLock(plan.outdir, deadline, () => {
     const existingStatus = readBuildStatus(plan.statusPath);
     if (existingStatus?.buildKey === plan.buildKey) {
@@ -669,12 +639,13 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
       ? new InlineServerOrchestrator(createRun)
       : new PrewarmedServerOrchestrator(createRun);
+  const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
 
   return {
     async run(callback) {
       const lease = await orchestrator.acquire();
       try {
-        return await lease.run.execute(callback);
+        return await lease.run.execute(callback, { closeAfterExecute: !keepsServerAlive });
       } finally {
         await lease.release();
       }

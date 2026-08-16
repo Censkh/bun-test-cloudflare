@@ -16,10 +16,13 @@ type FakeServer = {
   getLogsError?: unknown;
   listenCalls: number;
   close: () => Promise<void>;
+  clearLogs: () => void;
   getLogs: () => unknown[];
   getWorker: (name?: string) => FakeWorker;
   listen: () => Promise<{ url: URL }>;
   logs: unknown[];
+  update: () => Promise<void>;
+  updateCalls: number;
   workerEnvs: Record<string, unknown>;
 };
 
@@ -60,6 +63,9 @@ const createFakeServer = (): FakeServer => ({
     lifecycleEvents.push("closed");
     this.closeCalls += 1;
   },
+  clearLogs() {
+    this.logs = [];
+  },
   getLogs() {
     if (this.getLogsError) {
       throw this.getLogsError;
@@ -84,6 +90,10 @@ const createFakeServer = (): FakeServer => ({
     return { url: new URL("http://127.0.0.1:8787") };
   },
   logs: [],
+  async update() {
+    this.updateCalls += 1;
+  },
+  updateCalls: 0,
   workerEnvs: {},
 });
 
@@ -118,7 +128,8 @@ Bun.spawnSync = ((options: { cmd: string[]; timeout?: number }) => {
   };
 }) as typeof Bun.spawnSync;
 
-Bun.spawn = ((command: string[]) => {
+Bun.spawn = ((...args: Parameters<typeof Bun.spawn>) => {
+  const [command] = args;
   spawnedCommands.push(command);
   runFakeWranglerBuild(command);
   return {
@@ -341,7 +352,7 @@ test("copies explicit additional modules without recursively copying harness bui
   });
 });
 
-test("run starts the server, passes typed workers, and closes after success", async () => {
+test("run starts the server, passes typed workers, and reloads it after success", async () => {
   const harness = createCloudflareHarness({
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
@@ -359,7 +370,8 @@ test("run starts the server, passes typed workers, and closes after success", as
 
   expect(result).toBe("ok");
   expect(server.listenCalls).toBe(1);
-  expect(server.closeCalls).toBe(1);
+  expect(server.updateCalls).toBe(1);
+  expect(server.closeCalls).toBe(0);
 });
 
 test("run exposes workers and server through async run context", async () => {
@@ -445,17 +457,19 @@ test("parallel run calls use independent servers", async () => {
   await firstRun;
 
   try {
-    expect(createdServers.length - serversBefore).toBeGreaterThanOrEqual(1);
+    expect(createdServers.length - serversBefore).toBe(0);
     expect(firstServer).not.toBe(secondServer);
     expect(firstServer.listenCalls).toBe(1);
-    expect(firstServer.closeCalls).toBe(1);
+    expect(firstServer.updateCalls).toBe(1);
+    expect(firstServer.closeCalls).toBe(0);
     expect(secondServer.listenCalls).toBe(1);
     expect(secondServer.closeCalls).toBe(0);
   } finally {
     releaseSecondRun();
     await secondRun;
   }
-  expect(secondServer.closeCalls).toBe(1);
+  expect(secondServer.updateCalls).toBe(1);
+  expect(secondServer.closeCalls).toBe(0);
 });
 
 test("prewarms the configured server pool and refills it after a lease is released", async () => {
@@ -478,8 +492,9 @@ test("prewarms the configured server pool and refills it after a lease is releas
   });
 
   const harnessServers = createdServers.slice(serversBefore);
-  expect(harnessServers).toHaveLength(WARM_WORKERD_POOL_SIZE + 1);
-  expect(leasedServer.closeCalls).toBe(1);
+  expect(harnessServers).toHaveLength(WARM_WORKERD_POOL_SIZE);
+  expect(leasedServer.updateCalls).toBe(1);
+  expect(leasedServer.closeCalls).toBe(0);
   expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(WARM_WORKERD_POOL_SIZE);
 
   await closePrewarmedServerOrchestrators();
@@ -503,7 +518,8 @@ test("discards stale prewarmed servers before leasing them", async () => {
 
   expect(leasedServer).not.toBe(initialWarmServers[0]);
   expect(initialWarmServers[0].closeCalls).toBe(1);
-  expect(leasedServer.closeCalls).toBe(1);
+  expect(leasedServer.updateCalls).toBe(1);
+  expect(leasedServer.closeCalls).toBe(0);
 
   await closePrewarmedServerOrchestrators();
 });
@@ -561,7 +577,8 @@ test("run tolerates uncloneable worker runtime logs", async () => {
   }
 
   expect(server.listenCalls).toBe(1);
-  expect(server.closeCalls).toBe(1);
+  expect(server.updateCalls).toBe(1);
+  expect(server.closeCalls).toBe(0);
   expect(consoleErrors).toEqual([["[bun-test-cloudflare] Failed reading Worker runtime logs:"], [dataCloneError]]);
 });
 
@@ -591,6 +608,7 @@ test("run closes the server after callback failure", async () => {
   }
 
   expect(server.listenCalls).toBe(1);
-  expect(server.closeCalls).toBe(1);
+  expect(server.updateCalls).toBe(1);
+  expect(server.closeCalls).toBe(0);
   expect(consoleErrors).toEqual([["worker failed"]]);
 });
