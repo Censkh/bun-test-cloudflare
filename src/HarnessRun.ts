@@ -250,6 +250,10 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     this.#server.clearLogs();
   }
 
+  flushLogs() {
+    this.#logStream.flush();
+  }
+
   async close() {
     if (this.#closed) return;
     this.#closed = true;

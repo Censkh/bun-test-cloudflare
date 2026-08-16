@@ -13,6 +13,7 @@ type PrewarmedServerOrchestratorRegistry = {
 };
 
 type WarmHarnessRun<TWorkers extends Record<string, any>> = {
+  needsReset?: boolean;
   run: HarnessRun<TWorkers>;
   started: Promise<HarnessRun<TWorkers>>;
 };
@@ -121,6 +122,9 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       }
 
       try {
+        if (warmRun.needsReset) {
+          await run.resetForReuse();
+        }
         await run.assertUsable();
         break;
       } catch (error) {
@@ -141,17 +145,9 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
           return;
         }
 
-        try {
-          await run.resetForReuse();
-        } catch (error) {
-          await run.close();
-          this.#fillWarmPool();
-          this.#scheduleIdleClose();
-          throw error;
-        }
-
+        run.flushLogs();
         if (!this.#closed && this.#available.length + this.#inUse.size < WARM_WORKERD_POOL_SIZE) {
-          this.#available.push({ run, started: Promise.resolve(run) });
+          this.#available.push({ needsReset: true, run, started: Promise.resolve(run) });
         } else {
           await run.close();
         }
@@ -181,7 +177,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     }
   }
 
-  #createStartedRun() {
+  #createStartedRun(): WarmHarnessRun<TWorkers> {
     const run = this.createRun();
     const started = run.start().then(
       () => run,

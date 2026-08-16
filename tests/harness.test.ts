@@ -352,7 +352,7 @@ test("copies explicit additional modules without recursively copying harness bui
   });
 });
 
-test("run starts the server, passes typed workers, and reloads it after success", async () => {
+test("run starts the server, passes typed workers, and reloads it before reuse", async () => {
   const harness = createCloudflareHarness({
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
@@ -370,6 +370,14 @@ test("run starts the server, passes typed workers, and reloads it after success"
 
   expect(result).toBe("ok");
   expect(server.listenCalls).toBe(1);
+  expect(server.updateCalls).toBe(0);
+  expect(server.closeCalls).toBe(0);
+
+  await harness.run(() => {});
+  await harness.run((_workers, currentServer) => {
+    expect(currentServer as unknown).toBe(server as unknown);
+  });
+
   expect(server.updateCalls).toBe(1);
   expect(server.closeCalls).toBe(0);
 });
@@ -460,7 +468,7 @@ test("parallel run calls use independent servers", async () => {
     expect(createdServers.length - serversBefore).toBe(0);
     expect(firstServer).not.toBe(secondServer);
     expect(firstServer.listenCalls).toBe(1);
-    expect(firstServer.updateCalls).toBe(1);
+    expect(firstServer.updateCalls).toBe(0);
     expect(firstServer.closeCalls).toBe(0);
     expect(secondServer.listenCalls).toBe(1);
     expect(secondServer.closeCalls).toBe(0);
@@ -468,7 +476,7 @@ test("parallel run calls use independent servers", async () => {
     releaseSecondRun();
     await secondRun;
   }
-  expect(secondServer.updateCalls).toBe(1);
+  expect(secondServer.updateCalls).toBe(0);
   expect(secondServer.closeCalls).toBe(0);
 });
 
@@ -493,7 +501,7 @@ test("prewarms the configured server pool and refills it after a lease is releas
 
   const harnessServers = createdServers.slice(serversBefore);
   expect(harnessServers).toHaveLength(WARM_WORKERD_POOL_SIZE);
-  expect(leasedServer.updateCalls).toBe(1);
+  expect(leasedServer.updateCalls).toBe(0);
   expect(leasedServer.closeCalls).toBe(0);
   expect(harnessServers.filter((server) => server.closeCalls === 0)).toHaveLength(WARM_WORKERD_POOL_SIZE);
 
@@ -518,7 +526,7 @@ test("discards stale prewarmed servers before leasing them", async () => {
 
   expect(leasedServer).not.toBe(initialWarmServers[0]);
   expect(initialWarmServers[0].closeCalls).toBe(1);
-  expect(leasedServer.updateCalls).toBe(1);
+  expect(leasedServer.updateCalls).toBe(0);
   expect(leasedServer.closeCalls).toBe(0);
 
   await closePrewarmedServerOrchestrators();
@@ -577,7 +585,7 @@ test("run tolerates uncloneable worker runtime logs", async () => {
   }
 
   expect(server.listenCalls).toBe(1);
-  expect(server.updateCalls).toBe(1);
+  expect(server.updateCalls).toBe(0);
   expect(server.closeCalls).toBe(0);
   expect(consoleErrors).toEqual([["[bun-test-cloudflare] Failed reading Worker runtime logs:"], [dataCloneError]]);
 });
@@ -608,7 +616,7 @@ test("run closes the server after callback failure", async () => {
   }
 
   expect(server.listenCalls).toBe(1);
-  expect(server.updateCalls).toBe(1);
+  expect(server.updateCalls).toBe(0);
   expect(server.closeCalls).toBe(0);
   expect(consoleErrors).toEqual([["worker failed"]]);
 });
