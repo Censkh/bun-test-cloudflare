@@ -1,16 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "parallel-build-failure");
 const buildLogPath = path.join(fixtureRoot, "node_modules/.btcf/parallel-build-failure/builds.log");
 
+const fixture = bunFixtureTest(fixtureRoot);
+
 describe("parallel worker build failures", () => {
-  test("runs the failing build once and reports the same failure to waiting workers", () => {
+  fixture.test("runs the failing build once and reports the same failure to waiting workers", ({ run }) => {
     rmSync(path.join(fixtureRoot, "node_modules/.btcf"), { force: true, recursive: true });
 
-    const result = runBunFixture(fixtureRoot, {
+    const result = run({
       testArgs: ["--parallel=2", "--parallel-delay=0"],
       timeoutMs: 15_000,
     });

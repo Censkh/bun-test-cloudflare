@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { PrewarmedServerOrchestrator, WARM_WORKERD_POOL_SIZE } from "../src/PrewarmedServerOrchestrator";
+import {
+  PrewarmedServerOrchestrator,
+  ReusableServerOrchestrator,
+  WARM_WORKERD_POOL_SIZE,
+} from "../src/PrewarmedServerOrchestrator";
 
 test("prewarmed server cleanup waits for starting runs before closing them", async () => {
   const events: string[] = [];
@@ -80,6 +84,10 @@ test("prewarmed server acquire skips stuck warm runs", async () => {
       close: async () => {
         events.push(`closed:${runId}`);
       },
+      flushLogs: () => {},
+      resetForReuse: async () => {
+        events.push(`reset:${runId}`);
+      },
       start: async () => {
         if (runId < WARM_WORKERD_POOL_SIZE) {
           await new Promise(() => {});
@@ -106,4 +114,70 @@ test("prewarmed server acquire skips stuck warm runs", async () => {
   for (let index = 0; index < WARM_WORKERD_POOL_SIZE; index++) {
     expect(events).toContain(`closed:${index}`);
   }
+});
+
+test("prewarmed server reloads a returned run before its next lease", async () => {
+  const events: string[] = [];
+  let createdRuns = 0;
+  const orchestrator = new PrewarmedServerOrchestrator<any>(() => {
+    const runId = createdRuns++;
+    return {
+      assertUsable: async () => {
+        events.push(`usable:${runId}`);
+      },
+      close: async () => {},
+      flushLogs: () => {},
+      resetForReuse: async () => {
+        events.push(`reset:${runId}`);
+      },
+      start: async () => {},
+    } as any;
+  });
+
+  try {
+    const firstLease = await orchestrator.acquire();
+    await firstLease.release();
+    const secondLease = await orchestrator.acquire();
+    await secondLease.release();
+    const thirdLease = await orchestrator.acquire();
+    await thirdLease.release();
+  } finally {
+    await orchestrator.close();
+  }
+
+  expect(events).toEqual(["usable:0", "usable:1", "reset:0", "usable:0"]);
+});
+
+test("reusable server leases reset one live harness instead of recreating it", async () => {
+  const events: string[] = [];
+  let createdRuns = 0;
+  const orchestrator = new ReusableServerOrchestrator<any>(() => {
+    const runId = createdRuns++;
+    return {
+      assertUsable: async () => {
+        events.push(`usable:${runId}`);
+      },
+      close: async () => {
+        events.push(`closed:${runId}`);
+      },
+      resetForReuse: async () => {
+        events.push(`reset:${runId}`);
+      },
+      start: async () => {
+        events.push(`started:${runId}`);
+      },
+    } as any;
+  });
+
+  try {
+    const firstLease = await orchestrator.acquire();
+    await firstLease.release();
+    const secondLease = await orchestrator.acquire();
+    await secondLease.release();
+  } finally {
+    await orchestrator.close();
+  }
+
+  expect(createdRuns).toBe(1);
+  expect(events).toEqual(["started:0", "usable:0", "reset:0", "usable:0", "closed:0"]);
 });

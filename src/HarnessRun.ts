@@ -1,5 +1,8 @@
 import { onTestFinished } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { TestHarness, TestHarnessOptions } from "wrangler";
 import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
@@ -12,6 +15,7 @@ import {
   devEnvCaptureContext,
   disposeCapturedMiniflareRuntimes,
   platformProxyDispatchContext,
+  runWithTestHarnessPersistencePath,
 } from "./wranglerPatches";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
@@ -39,6 +43,18 @@ type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> 
 };
 
 const harnessRunContext = new AsyncLocalStorage<CloudflareHarnessRunContext<any>>();
+const timingOrigin = performance.now();
+
+const logTiming = (label: string, startedAt: number) => {
+  if (process.env.BUN_TEST_CLOUDFLARE_TIMINGS !== "1") {
+    return;
+  }
+
+  const now = performance.now();
+  process.stderr.write(
+    `[bun-test-cloudflare] +${(now - timingOrigin).toFixed(1)}ms ${label}: ${(now - startedAt).toFixed(1)}ms\n`,
+  );
+};
 
 export const getCloudflareHarnessRunContext = <const TWorkers extends Record<string, CloudflareWorkerConfig>>() => {
   const context = harnessRunContext.getStore();
@@ -179,23 +195,35 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   readonly #platformProxyDispatches = createAsyncOperationTracker();
   readonly #server: TestHarness;
   readonly #logStream: ReturnType<typeof streamServerLogs>;
+  readonly #storageRoot = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-"));
   #cacheStorage: CacheStorage | undefined;
   #closed = false;
   #startPromise: Promise<void> | undefined;
+  #storageGeneration = 0;
   #workers: CloudflareWorkerMap<TWorkers> | undefined;
 
+  readonly #timingLabel: string;
+
   constructor(private readonly options: HarnessRunOptions<TWorkers>) {
+    this.#timingLabel = options.preparedWorkers.map((worker) => worker.name).join(",");
     this.#server = createTestHarness(options.testHarnessOptions);
     this.#logStream = streamServerLogs(this.#server);
   }
 
   start() {
     this.#startPromise ??= (async () => {
-      await devEnvCaptureContext.run(this.#capturedDevEnvs, () => {
-        return this.#server.listen();
-      });
+      const startedAt = performance.now();
+      const listenStartedAt = performance.now();
+      await this.#runWithFreshStorage(() =>
+        devEnvCaptureContext.run(this.#capturedDevEnvs, () => this.#server.listen()),
+      );
+      logTiming(`${this.#timingLabel} start:listen`, listenStartedAt);
+
+      const cachesStartedAt = performance.now();
       this.#cacheStorage = await getCapturedRuntimeCaches(this.#capturedDevEnvs);
+      logTiming(`${this.#timingLabel} start:caches`, cachesStartedAt);
       this.#workers = this.#getWorkers();
+      logTiming(`${this.#timingLabel} start`, startedAt);
     })();
 
     return this.#startPromise;
@@ -203,8 +231,12 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
   async execute<TResult>(
     callback: (workers: CloudflareWorkerMap<TWorkers>, server: TestHarness) => Promise<TResult> | TResult,
+    { closeAfterExecute = true }: { closeAfterExecute?: boolean } = {},
   ) {
-    onTestFinished(() => this.close());
+    const startedAt = performance.now();
+    if (closeAfterExecute) {
+      onTestFinished(() => this.close());
+    }
 
     try {
       return await platformProxyDispatchContext.run(this.#platformProxyDispatches, async () => {
@@ -219,24 +251,57 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
             return callback(workers, this.#server);
           });
 
-        return await (this.#cacheStorage ? runWithCloudflareCaches(this.#cacheStorage, runCallback) : runCallback());
+        const callbackStartedAt = performance.now();
+        try {
+          return await (this.#cacheStorage ? runWithCloudflareCaches(this.#cacheStorage, runCallback) : runCallback());
+        } finally {
+          logTiming(`${this.#timingLabel} execute:callback`, callbackStartedAt);
+        }
       });
     } finally {
-      await this.close();
+      if (closeAfterExecute) {
+        await this.close();
+      }
+      logTiming(`${this.#timingLabel} execute`, startedAt);
     }
   }
 
   async assertUsable() {
+    const startedAt = performance.now();
     await this.start();
     if (!this.#workers) {
       throw new Error("Cloudflare harness run failed to start");
     }
 
     await Promise.all(Object.values(this.#workers).map((worker) => worker.getEnv()));
+    logTiming(`${this.#timingLabel} assert-usable`, startedAt);
+  }
+
+  async resetForReuse() {
+    const startedAt = performance.now();
+    if (this.#closed) {
+      throw new Error("Cloudflare harness run is closed");
+    }
+
+    await drainHarnessRun({
+      devEnvs: this.#capturedDevEnvs,
+      drainBrowserRendering: this.options.hasBrowserRendering,
+      platformProxyDispatches: this.#platformProxyDispatches,
+    });
+    await this.#closeActiveBrowserRenderingSessions();
+    this.#logStream.flush();
+    await this.#reloadConfiguration();
+    this.#server.clearLogs();
+    logTiming(`${this.#timingLabel} reset`, startedAt);
+  }
+
+  flushLogs() {
+    this.#logStream.flush();
   }
 
   async close() {
     if (this.#closed) return;
+    const startedAt = performance.now();
     this.#closed = true;
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] draining runtime messages");
@@ -261,12 +326,29 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
     debugCleanupSync("flush-log-stream", () => this.#logStream.flush());
     debugCleanupSync("stop-log-stream", () => this.#logStream.stop());
-    const closeError = await debugCleanup("close-server", () => closeServer(this.#server));
-    await debugCleanup("dispose-miniflare-runtimes", () => disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs));
-    if (closeError) {
-      throw closeError;
+    try {
+      const closeError = await debugCleanup("close-server", () => closeServer(this.#server));
+      await debugCleanup("dispose-miniflare-runtimes", () => disposeCapturedMiniflareRuntimes(this.#capturedDevEnvs));
+      if (closeError) {
+        throw closeError;
+      }
+    } finally {
+      rmSync(this.#storageRoot, { force: true, recursive: true });
+      logTiming(`${this.#timingLabel} close`, startedAt);
     }
     this.#logStream.assertNoWaitUntilFailures();
+  }
+
+  async #reloadConfiguration() {
+    await this.#runWithFreshStorage(() => this.#server.update((currentOptions) => currentOptions));
+    this.#cacheStorage = await getCapturedRuntimeCaches(this.#capturedDevEnvs);
+    this.#workers = this.#getWorkers();
+  }
+
+  #runWithFreshStorage<TResult>(callback: () => TResult) {
+    const persistencePath = path.join(this.#storageRoot, String(this.#storageGeneration++));
+    mkdirSync(persistencePath, { recursive: true });
+    return runWithTestHarnessPersistencePath(persistencePath, callback);
   }
 
   #getWorkers() {

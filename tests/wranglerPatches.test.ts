@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import {
   createAsyncOperationTracker,
   disposeCapturedMiniflareRuntimes,
@@ -17,29 +19,23 @@ test("tracks platform proxy dispatches until they finish", async () => {
   const bodyReleasePromise = new Promise<void>((resolve) => {
     releaseBody = resolve;
   });
-  const server = Bun.serve({
-    port: 0,
-    fetch() {
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            lifecycleEvents.push("body-started");
-            bodyStarted();
-            void bodyReleasePromise.then(() => {
-              controller.enqueue(new TextEncoder().encode("ok"));
-              controller.close();
-              lifecycleEvents.push("body-finished");
-            });
-          },
-        }),
-      );
-    },
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-length": "2" });
+    response.flushHeaders();
+    lifecycleEvents.push("body-started");
+    bodyStarted();
+    void bodyReleasePromise.then(() => {
+      response.end("ok");
+      lifecycleEvents.push("body-finished");
+    });
   });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 
   try {
     const tracker = createAsyncOperationTracker();
     await platformProxyDispatchContext.run(tracker, async () => {
-      const url = `http://${server.hostname}:${server.port}/cdn-cgi/platform-proxy`;
+      const { port } = server.address() as AddressInfo;
+      const url = `http://127.0.0.1:${port}/cdn-cgi/platform-proxy`;
       const responsePromise = trackPlatformProxyDispatch(url, undici.fetch(url));
       await bodyStartedPromise;
 
@@ -59,7 +55,9 @@ test("tracks platform proxy dispatches until they finish", async () => {
 
     expect(lifecycleEvents).toEqual(["body-started", "body-finished", "drained"]);
   } finally {
-    await server.stop(true);
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
   }
 });
 

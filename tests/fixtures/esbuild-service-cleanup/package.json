@@ -1,0 +1,9 @@
+{
+  "name": "esbuild-service-cleanup-fixture",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "wrangler": "4.120.0"
+  }
+}

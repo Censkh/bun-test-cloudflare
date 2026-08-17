@@ -30,6 +30,10 @@ type WranglerModuleWithDevEnv = typeof import("wrangler") & {
 
 export const devEnvCaptureContext = new AsyncLocalStorage<CapturedDevEnv[]>();
 export const platformProxyDispatchContext = new AsyncLocalStorage<AsyncOperationTracker>();
+const testHarnessPersistencePathContext = new AsyncLocalStorage<string>();
+
+export const runWithTestHarnessPersistencePath = <T>(persistencePath: string, callback: () => T) =>
+  testHarnessPersistencePathContext.run(persistencePath, callback);
 
 export const createAsyncOperationTracker = (): AsyncOperationTracker => {
   const pending = new Set<Promise<unknown>>();
@@ -132,6 +136,11 @@ const installDevEnvCapture = () => {
               // run against Miniflare-local bindings, so force local mode before
               // ConfigController resolves the worker bindings.
               input.dev.remote = false;
+
+              const persistencePath = testHarnessPersistencePathContext.getStore();
+              if (persistencePath) {
+                input.dev.persist = persistencePath;
+              }
             }
             return (originalSet as (...args: any[]) => Promise<unknown>)(...setArgs);
           }) as typeof config.set;

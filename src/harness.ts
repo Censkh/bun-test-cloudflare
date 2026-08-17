@@ -62,6 +62,18 @@ export type CloudflareHarness<TWorkers extends Record<string, CloudflareWorkerCo
 export { type CloudflareHarnessRunContext, getCloudflareHarnessRunContext };
 
 installWranglerPatches();
+const timingOrigin = performance.now();
+
+const logTiming = (label: string, startedAt: number) => {
+  if (process.env.BUN_TEST_CLOUDFLARE_TIMINGS !== "1") {
+    return;
+  }
+
+  const now = performance.now();
+  process.stderr.write(
+    `[bun-test-cloudflare] +${(now - timingOrigin).toFixed(1)}ms ${label}: ${(now - startedAt).toFixed(1)}ms\n`,
+  );
+};
 
 type WorkerBindings<TWorker> = TWorker extends { bindings?: TypeToken<infer TBindings> }
   ? TBindings
@@ -208,14 +220,10 @@ type WorkerBuildPlan = {
   workerName: string;
 };
 
-const getBunTestWorkerId = () => process.env.BUN_TEST_WORKER_ID ?? process.env.JEST_WORKER_ID;
-
-const isWorkerBuildOwner = () => {
-  const workerId = getBunTestWorkerId();
-  return workerId === undefined || workerId === "1";
-};
-
-const getBunTestRunKey = () => (getBunTestWorkerId() === undefined ? String(process.pid) : String(process.ppid));
+const getBunTestRunKey = () =>
+  process.env.BUN_TEST_WORKER_ID === undefined && process.env.JEST_WORKER_ID === undefined
+    ? String(process.pid)
+    : String(process.ppid);
 
 const getBuildStatusPath = (outdir: string) => `${outdir}.build-${getBunTestRunKey()}.json`;
 
@@ -245,28 +253,6 @@ const throwBuildFailure = (status: Extract<WorkerBuildStatus, { state: "failure"
     error.stack = status.errorStack;
   }
   throw error;
-};
-
-const waitForWorkerBuild = (
-  statusPath: string,
-  buildKey: string,
-  outdir: string,
-  deadline: number,
-): WorkerBuildResult => {
-  while (getRemainingBuildTimeMs(deadline) > 0) {
-    const status = readBuildStatus(statusPath);
-    if (status?.buildKey === buildKey) {
-      if (status.state === "success" && existsSync(status.builtMain)) {
-        return { built: false, builtMain: status.builtMain };
-      }
-      if (status.state === "failure") {
-        throwBuildFailure(status);
-      }
-    }
-    sleepSync(50);
-  }
-
-  throw new Error(`Timed out waiting for worker build status after ${buildInitializationTimeoutMs}ms: ${outdir}`);
 };
 
 const withBuildLock = <TResult>(outdir: string, deadline: number, callback: () => TResult) => {
@@ -456,10 +442,6 @@ const copyAdditionalModules = (plan: WorkerBuildPlan) => {
 
 const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   const deadline = Date.now() + buildInitializationTimeoutMs;
-  if (!isWorkerBuildOwner()) {
-    return waitForWorkerBuild(plan.statusPath, plan.buildKey, plan.outdir, deadline);
-  }
-
   return withBuildLock(plan.outdir, deadline, () => {
     const existingStatus = readBuildStatus(plan.statusPath);
     if (existingStatus?.buildKey === plan.buildKey) {
@@ -548,12 +530,34 @@ const resolveInlineConfig = (
   };
 };
 
+const resolveConfigPaths = (config: Record<string, any>, configDirectory: string): Record<string, any> => {
+  const resolvePath = (value: unknown) =>
+    typeof value === "string" && !path.isAbsolute(value) ? path.resolve(configDirectory, value) : value;
+
+  return {
+    ...config,
+    ...(config.main ? { main: resolvePath(config.main) } : {}),
+    ...(config.tsconfig ? { tsconfig: resolvePath(config.tsconfig) } : {}),
+    ...(config.assets && typeof config.assets === "object" && config.assets.directory
+      ? {
+          assets: {
+            ...config.assets,
+            directory: resolvePath(config.assets.directory),
+          },
+        }
+      : {}),
+  };
+};
+
 const resolveWorkerConfig = (input: WorkerInput, root: string | undefined, fallbackWorkerName: string) => {
   if ("configPath" in input) {
     const { configPath, env } = input;
     const resolvedConfigPath = resolveConfigPath(configPath, root);
-    const config = unstable_readConfig({ config: resolvedConfigPath, ...(env ? { env } : {}) }, { hideWarnings: true });
     const configDirectory = path.dirname(resolvedConfigPath);
+    const config = resolveConfigPaths(
+      unstable_readConfig({ config: resolvedConfigPath, ...(env ? { env } : {}) }, { hideWarnings: true }),
+      configDirectory,
+    );
     return {
       additionalModuleSourceRoots: getAdditionalModuleSourceRoots(
         typeof config.base_dir === "string" ? resolveConfigPath(config.base_dir, configDirectory) : undefined,
@@ -581,7 +585,12 @@ const prepareWorkerInput = (
   const vars = "vars" in input ? input.vars : undefined;
   const secrets = "secrets" in input ? input.secrets : undefined;
   const env = "env" in input ? input.env : undefined;
-  const { additionalModuleSourceRoots, config, outdir } = resolveWorkerConfig(input, root, worker.name ?? key);
+  const {
+    additionalModuleSourceRoots,
+    config: resolvedConfig,
+    outdir,
+  } = resolveWorkerConfig(input, root, worker.name ?? key);
+  const config = resolvedConfig as Record<string, any>;
   const workerName = worker.name ?? config.name ?? key;
   const testConfig = withTestEnvironmentDefine(config);
   const buildPlan = createWorkerBuildPlan(workerName, outdir, testConfig, config, env, additionalModuleSourceRoots);
@@ -642,14 +651,21 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
       ? new InlineServerOrchestrator(createRun)
       : new PrewarmedServerOrchestrator(createRun);
+  const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
 
   return {
     async run(callback) {
+      const runStartedAt = performance.now();
+      const acquireStartedAt = performance.now();
       const lease = await orchestrator.acquire();
+      logTiming("harness acquire", acquireStartedAt);
       try {
-        return await lease.run.execute(callback);
+        return await lease.run.execute(callback, { closeAfterExecute: !keepsServerAlive });
       } finally {
+        const releaseStartedAt = performance.now();
         await lease.release();
+        logTiming("harness release", releaseStartedAt);
+        logTiming("harness run", runStartedAt);
       }
     },
   };

@@ -1,11 +1,17 @@
-import { describe, test } from "bun:test";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { describe } from "bun:test";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "cloudflare-harness");
 
+const fixture = bunFixtureTest(fixtureRoot);
+
 describe("Cloudflare harness fixture", () => {
-  test("passes in its own Bun test process", () => {
-    const result = runBunFixture(fixtureRoot);
-    result.expectStatusCode(0);
-  }, 15_000);
+  fixture.test(
+    "passes in its own Bun test process",
+    ({ run }) => {
+      const result = run();
+      result.expectStatusCode(0);
+    },
+    15_000,
+  );
 });
