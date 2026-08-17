@@ -1,12 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import { readdirSync, rmSync, unlinkSync } from "node:fs";
 import path from "node:path";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const serviceBindingFixtureTimeoutMs = 30_000;
 const serviceBindingTestTimeoutMs = 75_000;
 const sharedHarnessFixtureTimeoutMs = 30_000;
 const sharedHarnessTestTimeoutMs = 45_000;
+const globalCachesFixtureRoot = fixturePath(import.meta.dir, "global-caches-outside-run-repro");
+const serviceBindingFixtureRoot = fixturePath(import.meta.dir, "service-binding-missing-module-repro");
+const sharedHarnessFixtureRoot = fixturePath(import.meta.dir, "shared-harness-closed-repro");
+
+const globalCachesFixture = bunFixtureTest(globalCachesFixtureRoot);
+const serviceBindingFixture = bunFixtureTest(serviceBindingFixtureRoot, { installMode: "full" });
+const sharedHarnessFixture = bunFixtureTest(sharedHarnessFixtureRoot);
 
 const removeFixtureBuildStatuses = (fixtureRoot: string) => {
   const buildRoot = path.join(fixtureRoot, "node_modules/.btcf/worker-build");
@@ -43,41 +50,35 @@ const findNestedHarnessBuildDirectories = (fixtureRoot: string) => {
 };
 
 describe("surfaced issue repro fixtures", () => {
-  test("global caches access outside harness.run does not fail during module evaluation", () => {
-    const result = runBunFixture(fixturePath(import.meta.dir, "global-caches-outside-run-repro"), {
-      timeoutMs: 15_000,
-    });
+  globalCachesFixture.test(
+    "global caches access outside harness.run does not fail during module evaluation",
+    ({ run }) => {
+      const result = run({ timeoutMs: 15_000 });
 
-    result.expectStatusCode(0);
-  });
+      result.expectStatusCode(0);
+    },
+  );
 
-  test(
+  serviceBindingFixture.test(
     "runtime dynamic imports are available from built Worker modules through service bindings",
-    () => {
-      const fixtureRoot = fixturePath(import.meta.dir, "service-binding-missing-module-repro");
-      rmSync(path.join(fixtureRoot, "node_modules/.btcf"), { force: true, recursive: true });
+    ({ run }) => {
+      rmSync(path.join(serviceBindingFixtureRoot, "node_modules/.btcf"), { force: true, recursive: true });
 
-      const firstResult = runBunFixture(fixtureRoot, {
-        installMode: "full",
-        timeoutMs: serviceBindingFixtureTimeoutMs,
-      });
+      const firstResult = run({ timeoutMs: serviceBindingFixtureTimeoutMs });
       firstResult.expectStatusCode(0);
 
-      removeFixtureBuildStatuses(fixtureRoot);
-      const secondResult = runBunFixture(fixtureRoot, {
-        installMode: "full",
-        timeoutMs: serviceBindingFixtureTimeoutMs,
-      });
+      removeFixtureBuildStatuses(serviceBindingFixtureRoot);
+      const secondResult = run({ timeoutMs: serviceBindingFixtureTimeoutMs });
       secondResult.expectStatusCode(0);
-      expect(findNestedHarnessBuildDirectories(fixtureRoot)).toEqual([]);
+      expect(findNestedHarnessBuildDirectories(serviceBindingFixtureRoot)).toEqual([]);
     },
     serviceBindingTestTimeoutMs,
   );
 
-  test(
+  sharedHarnessFixture.test(
     "shared prewarmed harness remains usable across fixture files",
-    () => {
-      const result = runBunFixture(fixturePath(import.meta.dir, "shared-harness-closed-repro"), {
+    ({ run }) => {
+      const result = run({
         testArgs: ["--max-concurrency=1"],
         timeoutMs: sharedHarnessFixtureTimeoutMs,
       });

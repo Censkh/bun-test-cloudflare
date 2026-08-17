@@ -1,22 +1,15 @@
-import { test } from "bun:test";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "wrangler-start-timeout-repro");
 const fixtureTimeoutMs = 20_000;
 const testTimeoutMs = 30_000;
 
-const runFixture = (env: Record<string, string> = {}) => {
-  return runBunFixture(fixtureRoot, {
-    env,
-    testArgs: ["--no-orphans", "--max-concurrency=1"],
-    timeoutMs: fixtureTimeoutMs,
-  });
-};
+const fixture = bunFixtureTest(fixtureRoot);
 
-test(
+fixture.test(
   "Wrangler can restart after an abandoned harness run",
-  () => {
-    const result = runFixture();
+  ({ run }) => {
+    const result = run({ testArgs: ["--no-orphans", "--max-concurrency=1"], timeoutMs: fixtureTimeoutMs });
 
     result.expectStatusCode(0);
   },

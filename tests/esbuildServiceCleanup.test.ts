@@ -1,10 +1,11 @@
-import { test } from "bun:test";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "esbuild-service-cleanup");
 
-test("stops Wrangler esbuild services after harness teardown", () => {
-  const result = runBunFixture(fixtureRoot, { timeoutMs: 20_000 });
+const fixture = bunFixtureTest(fixtureRoot);
+
+fixture.test("stops Wrangler esbuild services after harness teardown", ({ run }) => {
+  const result = run({ timeoutMs: 20_000 });
 
   result.expectStatusCode(0);
 });

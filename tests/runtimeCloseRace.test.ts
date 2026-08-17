@@ -1,15 +1,17 @@
-import { describe, expect, test } from "bun:test";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { describe, expect } from "bun:test";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "runtime-close-race");
 const fixtureTimeoutMs = 30_000;
 const testTimeoutMs = 45_000;
 
+const fixture = bunFixtureTest(fixtureRoot);
+
 describe("runtime close race repro", () => {
-  test(
+  fixture.test(
     "closes after platform proxy dispatches settle",
-    () => {
-      const result = runBunFixture(fixtureRoot, {
+    ({ run }) => {
+      const result = run({
         testArgs: ["--parallel=1", "--parallel-delay=0"],
         timeoutMs: fixtureTimeoutMs,
       });

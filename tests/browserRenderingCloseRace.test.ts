@@ -1,20 +1,21 @@
-import { describe, expect, test } from "bun:test";
-import { fixturePath, runBunFixture } from "./fixtureRunner";
+import { describe, expect } from "bun:test";
+import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "browser-rendering-close-race");
 const fixtureTimeoutMs = 30_000;
 const testTimeoutMs = 45_000;
 
+const fixture = bunFixtureTest(fixtureRoot, { installMode: "full" });
+
 describe("Browser Rendering close race", () => {
-  test(
+  fixture.test(
     "closes active Browser Rendering sessions before Miniflare shutdown",
-    () => {
-      const result = runBunFixture(fixtureRoot, {
+    ({ run }) => {
+      const result = run({
         env: {
           BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP: "1",
         },
         fixtureTests: ["./browserRenderingLeakedSession.fixture.ts"],
-        installMode: "full",
         testArgs: ["--parallel=1"],
         timeoutMs: fixtureTimeoutMs,
       });
@@ -29,11 +30,10 @@ describe("Browser Rendering close race", () => {
     testTimeoutMs,
   );
 
-  test(
+  fixture.test(
     "does not remove Browser Rendering profile directories while launches are in flight",
-    () => {
-      const result = runBunFixture(fixtureRoot, {
-        installMode: "full",
+    ({ run }) => {
+      const result = run({
         testArgs: ["--parallel=4", "--parallel-delay=0"],
         timeoutMs: fixtureTimeoutMs,
       });
