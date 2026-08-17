@@ -297,6 +297,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
   flushLogs() {
     this.#logStream.flush();
+    this.#logStream.assertNoWaitUntilFailures();
   }
 
   async close() {
