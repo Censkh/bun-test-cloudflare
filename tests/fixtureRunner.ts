@@ -85,6 +85,7 @@ const prepareBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions
 
 const beforeBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions = {}) => {
   const resolvedFixtureRoot = path.resolve(fixtureRoot);
+
   beforeAll(() => {
     prepareBunFixture(resolvedFixtureRoot, options);
     preparedFixtureRoots.add(resolvedFixtureRoot);
