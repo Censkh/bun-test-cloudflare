@@ -137,7 +137,15 @@ test("calls the backend worker", async () => {
 });
 ```
 
-`run()` creates a fresh Wrangler test server, starts it before the callback, and always closes it afterwards, including when the callback throws.
+`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool stays alive until Bun's suite cleanup. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
+
+## Profile Harness Time
+
+Set `BUN_TEST_CLOUDFLARE_TIMINGS=1` to print phase timings for Worker startup, lease acquisition, callback execution, storage reset, and cleanup. Fixture tests also forward their captured Worker timing logs in this mode.
+
+```sh
+BUN_TEST_CLOUDFLARE_TIMINGS=1 bun test
+```
 
 ## OpenNext Applications
 

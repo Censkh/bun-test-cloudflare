@@ -62,6 +62,18 @@ export type CloudflareHarness<TWorkers extends Record<string, CloudflareWorkerCo
 export { type CloudflareHarnessRunContext, getCloudflareHarnessRunContext };
 
 installWranglerPatches();
+const timingOrigin = performance.now();
+
+const logTiming = (label: string, startedAt: number) => {
+  if (process.env.BUN_TEST_CLOUDFLARE_TIMINGS !== "1") {
+    return;
+  }
+
+  const now = performance.now();
+  process.stderr.write(
+    `[bun-test-cloudflare] +${(now - timingOrigin).toFixed(1)}ms ${label}: ${(now - startedAt).toFixed(1)}ms\n`,
+  );
+};
 
 type WorkerBindings<TWorker> = TWorker extends { bindings?: TypeToken<infer TBindings> }
   ? TBindings
@@ -643,11 +655,17 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
 
   return {
     async run(callback) {
+      const runStartedAt = performance.now();
+      const acquireStartedAt = performance.now();
       const lease = await orchestrator.acquire();
+      logTiming("harness acquire", acquireStartedAt);
       try {
         return await lease.run.execute(callback, { closeAfterExecute: !keepsServerAlive });
       } finally {
+        const releaseStartedAt = performance.now();
         await lease.release();
+        logTiming("harness release", releaseStartedAt);
+        logTiming("harness run", runStartedAt);
       }
     },
   };

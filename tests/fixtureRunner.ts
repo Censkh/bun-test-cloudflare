@@ -164,7 +164,7 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
   const stdout = result.stdout.toString();
   const stderr = result.stderr.toString();
 
-  if (options.logOutput) {
+  if (options.logOutput || process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1") {
     console.error(`[fixture:${path.basename(fixtureRoot)}] ${durationMs.toFixed(1)}ms`);
     if (stdout) console.error(stdout);
     if (stderr) console.error(stderr);
