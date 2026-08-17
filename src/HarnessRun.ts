@@ -52,6 +52,7 @@ export const getCloudflareHarnessRunContext = <const TWorkers extends Record<str
 const streamServerLogs = (server: TestHarness) => {
   let streamedLogs = 0;
   let loggedReadError = false;
+  const waitUntilFailures: string[] = [];
 
   const writeLog = (log: ReturnType<TestHarness["getLogs"]>[number]) => {
     const message = "message" in log ? log.message : JSON.stringify(log);
@@ -84,12 +85,23 @@ const streamServerLogs = (server: TestHarness) => {
 
     for (const log of pendingLogs) {
       writeLog(log);
+      const message = "message" in log ? log.message : JSON.stringify(log);
+      if (log.level === "error" && /\bwait\s*until\b/i.test(message)) {
+        waitUntilFailures.push(message);
+      }
     }
   };
 
   const interval = setInterval(flush, 25);
 
   return {
+    assertNoWaitUntilFailures: () => {
+      if (waitUntilFailures.length === 0) return;
+
+      throw new Error(
+        `Worker waitUntil promise rejection${waitUntilFailures.length === 1 ? "" : "s"}:\n${waitUntilFailures.join("\n")}`,
+      );
+    },
     flush,
     stop: () => clearInterval(interval),
   };
@@ -254,6 +266,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     if (closeError) {
       throw closeError;
     }
+    this.#logStream.assertNoWaitUntilFailures();
   }
 
   #getWorkers() {
