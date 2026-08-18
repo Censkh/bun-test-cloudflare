@@ -590,6 +590,30 @@ test("run tolerates uncloneable worker runtime logs", async () => {
   expect(consoleErrors).toEqual([["[bun-test-cloudflare] Failed reading Worker runtime logs:"], [dataCloneError]]);
 });
 
+test("run fails after cleanup when Worker waitUntil work rejects", async () => {
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml" },
+    },
+  });
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  let server!: FakeServer;
+  try {
+    await expect(
+      harness.run((_workers, currentServer) => {
+        server = currentServer as unknown as FakeServer;
+        server.logs = [{ level: "error", message: "waitUntil - Promise failed with error: background task failed" }];
+      }),
+    ).rejects.toThrow(/Worker waitUntil promise rejection:[\s\S]*background task failed/);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  expect(server.closeCalls).toBe(1);
+});
+
 test("run closes the server after callback failure", async () => {
   const harness = createCloudflareHarness({
     workers: {

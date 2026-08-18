@@ -142,7 +142,13 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
           return;
         }
 
-        run.flushLogs();
+        try {
+          run.flushLogs();
+        } catch (error) {
+          await run.close().catch(() => {});
+          this.#fillWarmPool();
+          throw error;
+        }
         if (!this.#closed && this.#available.length + this.#inUse.size < WARM_WORKERD_POOL_SIZE) {
           this.#available.push({ needsReset: true, run, started: Promise.resolve(run) });
         } else {

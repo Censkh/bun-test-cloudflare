@@ -34,6 +34,9 @@ describe("Browser Rendering close race", () => {
     "does not remove Browser Rendering profile directories while launches are in flight",
     ({ run }) => {
       const result = run({
+        env: {
+          BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM: "1",
+        },
         testArgs: ["--parallel=4", "--parallel-delay=0"],
         timeoutMs: fixtureTimeoutMs,
       });
