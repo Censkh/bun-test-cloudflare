@@ -17,6 +17,12 @@ export type CapturedDevEnv = {
       dispose?: () => Promise<void> | void;
     };
   }>;
+  on?: (event: string, listener: (value: any) => void) => unknown;
+  runtimeErrors?: Array<{
+    source?: string;
+    stack?: string;
+    text?: string;
+  }>;
 };
 
 export type AsyncOperationTracker = {
@@ -115,6 +121,14 @@ const installDevEnvCapture = () => {
     wranglerModule.unstable_DevEnv = class BunTestCloudflareCapturedDevEnv extends OriginalDevEnv {
       constructor(...args: any[]) {
         super(...args);
+        this.runtimeErrors = [];
+        this.on?.("runtimeError", (error: { source?: string; stack?: string; text?: string }) => {
+          this.runtimeErrors?.push(error);
+          console.error("[bun-test-cloudflare] Worker runtime error:", error.text ?? "Unknown error");
+          if (error.stack) {
+            console.error(error.stack);
+          }
+        });
         if (shouldInstallCompatibilityPatch("wrangler-dev-env-force-local")) {
           this.#installConfigPatch();
         }
