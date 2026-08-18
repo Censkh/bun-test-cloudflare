@@ -26,6 +26,24 @@ const png1x1 = Buffer.from(
 );
 const gif1x1 = Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64");
 const maxImageUploadBytes = 10 * 1024 * 1024;
+const imageBindingTimingsEnabled = process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1";
+
+const logImageBindingTiming = (label: string, startedAt: number) => {
+  if (!imageBindingTimingsEnabled) return;
+  process.stderr.write(`[images-binding] ${label}: ${(performance.now() - startedAt).toFixed(1)}ms\n`);
+};
+
+const timeImageBindingOperation = async <T>(label: string, callback: () => Promise<T>): Promise<T> => {
+  const startedAt = performance.now();
+  if (imageBindingTimingsEnabled) {
+    process.stderr.write(`[images-binding] ${label}: started\n`);
+  }
+  try {
+    return await callback();
+  } finally {
+    logImageBindingTiming(label, startedAt);
+  }
+};
 
 const padOverUploadLimit = (bytes: Buffer) => Buffer.concat([bytes, Buffer.alloc(maxImageUploadBytes + 1)]);
 
@@ -76,6 +94,9 @@ const getScaledDimensions = (width: number, height: number, scale: number) => ({
   height: Math.max(1, Math.floor(height * scale)),
 });
 
+const isUnsupportedGifOutputError = (error: unknown) =>
+  error instanceof Error && error.message.includes("GIF output is not supported in local mode");
+
 const prepareOversizedInput = async (env: ImagesEnv, format: (typeof imageFormats)[number]) => {
   if (format.mimeType === "image/png") {
     return padOverUploadLimit(png1x1);
@@ -84,39 +105,49 @@ const prepareOversizedInput = async (env: ImagesEnv, format: (typeof imageFormat
     return padOverUploadLimit(gif1x1);
   }
 
-  const output = await env.IMAGES.input(imageStream()).output({
-    format: format.outputFormat,
-    quality: 100,
+  return timeImageBindingOperation(`prepare ${format.mimeType}`, async () => {
+    const output = await env.IMAGES.input(imageStream()).output({
+      format: format.outputFormat,
+      quality: 100,
+    });
+    return padOverUploadLimit(await streamToBytes(output.image()));
   });
-  return padOverUploadLimit(await streamToBytes(output.image()));
 };
 
 const normalizeLikeBackend = async (env: ImagesEnv, bytes: Buffer, mimeType: string) => {
-  const imageInfo = await env.IMAGES.info(imageStream(bytes));
+  const imageInfo = await timeImageBindingOperation(`info ${mimeType}`, () => env.IMAGES.info(imageStream(bytes)));
   expect(imageInfo.width).toBe(1);
 
   const byteScale = Math.min(1, Math.sqrt(maxImageUploadBytes / bytes.byteLength) * 0.98);
   const scaleCandidates = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2].map((multiplier) => byteScale * multiplier);
 
   for (const outputMimeType of getOutputCandidates(mimeType)) {
+    let outputFormatSupported = true;
     for (const scale of scaleCandidates) {
       const { width, height } = getScaledDimensions(imageInfo.width, imageInfo.height, scale);
       for (const quality of getQualityCandidates(outputMimeType)) {
         try {
-          const output = await env.IMAGES.input(imageStream(bytes))
-            .transform({ width, height, fit: "scale-down" })
-            .output({ format: outputMimeType, quality });
-          const outputBytes = await streamToBytes(output.image());
+          const outputBytes = await timeImageBindingOperation(
+            `normalize ${mimeType} -> ${outputMimeType} ${width}x${height} q${quality ?? "default"}`,
+            async () => {
+              const output = await env.IMAGES.input(imageStream(bytes))
+                .transform({ width, height, fit: "scale-down" })
+                .output({ format: outputMimeType, quality });
+              return streamToBytes(output.image());
+            },
+          );
           if (outputBytes.byteLength <= maxImageUploadBytes) {
             return outputBytes;
           }
         } catch (error) {
-          if (error instanceof Error && error.message.includes("GIF output is not supported in local mode")) {
-            continue;
+          if (isUnsupportedGifOutputError(error)) {
+            outputFormatSupported = false;
+            break;
           }
           throw error;
         }
       }
+      if (!outputFormatSupported) break;
     }
   }
 
@@ -150,18 +181,20 @@ test("backend-like parallel oversized normalization reports unsupported HEIF err
     const env = await workers.IMAGE_WORKER.getEnv<ImagesEnv>();
 
     const results = await Promise.allSettled(
-      imageFormats.map(async (format) => {
-        const inputBytes = await prepareOversizedInput(env, format);
-        expect(inputBytes.byteLength).toBeGreaterThan(maxImageUploadBytes);
+      imageFormats.map((format) =>
+        timeImageBindingOperation(`format ${format.mimeType}`, async () => {
+          const inputBytes = await prepareOversizedInput(env, format);
+          expect(inputBytes.byteLength).toBeGreaterThan(maxImageUploadBytes);
 
-        const normalizedBytes = await normalizeLikeBackend(env, inputBytes, format.mimeType);
-        expect(normalizedBytes.byteLength).toBeLessThanOrEqual(maxImageUploadBytes);
+          const normalizedBytes = await normalizeLikeBackend(env, inputBytes, format.mimeType);
+          expect(normalizedBytes.byteLength).toBeLessThanOrEqual(maxImageUploadBytes);
 
-        const inputInfo = await env.IMAGES.info(imageStream(inputBytes));
-        const outputInfo = await env.IMAGES.info(imageStream(normalizedBytes));
-        expect(inputInfo.width).toBe(1);
-        expect(outputInfo.width).toBe(1);
-      }),
+          const inputInfo = await env.IMAGES.info(imageStream(inputBytes));
+          const outputInfo = await env.IMAGES.info(imageStream(normalizedBytes));
+          expect(inputInfo.width).toBe(1);
+          expect(outputInfo.width).toBe(1);
+        }),
+      ),
     );
 
     const failure = results.find((result) => result.status === "rejected");
