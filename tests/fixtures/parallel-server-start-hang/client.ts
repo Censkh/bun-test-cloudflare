@@ -71,7 +71,7 @@ export const createClient = () => {
         const startResult = await postMultipartStart.submit({
           body: {
             part: {
-              blob: new Blob([firstPart]),
+              data: new Blob([firstPart]),
               type: "image/png",
             },
           },
@@ -79,7 +79,7 @@ export const createClient = () => {
         const completeResult = await postMultipartComplete.submit({
           body: {
             part: {
-              blob: new Blob([finalPart]),
+              data: new Blob([finalPart]),
               isFinal: true,
               partNumber: 2,
               type: "image/png",
