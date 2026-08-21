@@ -1,0 +1,16 @@
+name = "prewarmed-storage-reset"
+main = "src/worker.ts"
+compatibility_date = "2026-08-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "prewarmed-storage-reset"
+database_id = "prewarmed-storage-reset"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "prewarmed-storage-reset"
+
+[[r2_buckets]]
+binding = "DOCUMENTS"
+bucket_name = "prewarmed-storage-reset"
