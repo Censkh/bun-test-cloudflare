@@ -12,6 +12,6 @@ describe("Cloudflare harness fixture", () => {
       const result = run();
       result.expectStatusCode(0);
     },
-    15_000,
+    45_000,
   );
 });

@@ -9,7 +9,7 @@ Bun test support and a typed harness wrapper for Cloudflare Workers projects, wi
 - `bun-test-cloudflare/setup`: Bun test preload that patches the runtime pieces Wrangler/Miniflare needs under Bun.
 - `bun-test-cloudflare`: `createCloudflareHarness()` wrapper that turns named worker config into typed worker handles.
 
-The setup currently fixes Bun/Miniflare websocket compatibility by adapting bare `ws` imports to Bun's native websocket client while preserving npm `ws` server exports for Miniflare internals. It also provides a minimal `cloudflare:workers` `DurableObject` shim for plain Bun module imports.
+The setup installs only the Bun/Miniflare compatibility patches still needed for the active Bun version. It also provides a minimal `cloudflare:workers` `DurableObject` shim for plain Bun module imports.
 
 ## Install
 
@@ -38,41 +38,6 @@ If you do not need app-specific setup, use only:
 [test]
 preload = ["bun-test-cloudflare/setup"]
 ```
-
-## Bun 1.4 Canary Patch Audit
-
-On Bun 1.4 and later, `web-streams`, the `undici-mark-as-uncloneable` and
-`undici-commonjs-require` shims,
-`miniflare-headers`, `wrangler-guess-worker-format`, and the two platform-proxy
-dispatch/response-drain shims, plus `worker-threads-fifo` and
-`worker-threads-no-timeouts`, are disabled by default. Use
-`BUN_TEST_CLOUDFLARE_BUN_1_4_DISABLED_PATCHES` to audit additional patches without
-changing behavior for older Bun versions:
-
-```sh
-BUN_TEST_CLOUDFLARE_BUN_1_4_DISABLED_PATCHES=websocket bun test
-```
-
-Use comma-separated patch names to audit several at once. Valid names are:
-`web-streams`, `global-caches`, `child-process-extra-fd`, `workerd-child-process`,
-`browser-rendering`, `undici`, `undici-mark-as-uncloneable`, `undici-commonjs-require`,
-`undici-esm-module`, `websocket`, `worker-threads`, `miniflare-web-globals`,
-`miniflare-request`, `miniflare-response`, `miniflare-headers`, `miniflare-form-data`,
-`wrangler-guess-worker-format`, `miniflare-loopback`, `miniflare`,
-`miniflare-platform-proxy-dispatch`, `platform-proxy-response-drain`,
-`worker-threads-fifo`, `worker-threads-stream-bridge`, `worker-threads-no-timeouts`,
-`cloudflare-workers`, and `wrangler-dev-env`.
-
-The fetch-related parent patches can be audited in smaller pieces:
-
-- `miniflare-request`, `miniflare-response`, `miniflare-headers`, and `miniflare-form-data`
-  independently control the Miniflare Web API globals.
-- `undici-mark-as-uncloneable`, `undici-commonjs-require`, and `undici-esm-module`
-  independently control the Undici compatibility shims.
-- `miniflare-platform-proxy-dispatch` controls the Miniflare `dispatchFetch` wrapper, while
-  `platform-proxy-response-drain` controls the response-body drain used during teardown.
-
-For a version-independent experiment, use `BUN_TEST_CLOUDFLARE_DISABLED_PATCHES` instead.
 
 ## Create A Typed Harness
 

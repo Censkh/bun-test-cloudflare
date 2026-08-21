@@ -1,18 +1,36 @@
 import childProcess from "node:child_process";
 import path from "node:path";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 type UnrefableStream = {
   unref?: () => void;
+};
+
+type WorkerdChildProcessPatchOptions = {
+  stdioUnref: boolean;
+  unref: boolean;
 };
 
 const isWorkerdServe = (command: string, args?: readonly string[]) => {
   return path.basename(command).includes("workerd") && args?.includes("serve");
 };
 
-export const unrefWorkerdChildProcess = (child: childProcess.ChildProcess) => {
-  child.unref();
-  for (const stream of child.stdio.slice(0, 3)) {
-    (stream as UnrefableStream | null)?.unref?.();
+const getWorkerdChildProcessPatchOptions = (): WorkerdChildProcessPatchOptions => ({
+  stdioUnref: shouldInstallCompatibilityPatch("workerd-child-process-stdio-unref"),
+  unref: shouldInstallCompatibilityPatch("workerd-child-process-unref"),
+});
+
+export const unrefWorkerdChildProcess = (
+  child: childProcess.ChildProcess,
+  options: WorkerdChildProcessPatchOptions = getWorkerdChildProcessPatchOptions(),
+) => {
+  if (options.unref) {
+    child.unref();
+  }
+  if (options.stdioUnref) {
+    for (const stream of child.stdio.slice(0, 3)) {
+      (stream as UnrefableStream | null)?.unref?.();
+    }
   }
 };
 

@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { shouldInstallCompatibilityPatch } from "./CompatibilityPatches";
+import { shouldInstallCompatibilityPatch, shouldInstallCompatibilityPatchGroup } from "./CompatibilityPatches";
 
 export type CapturedDevEnv = {
   config?: {
@@ -121,15 +121,20 @@ const installDevEnvCapture = () => {
     wranglerModule.unstable_DevEnv = class BunTestCloudflareCapturedDevEnv extends OriginalDevEnv {
       constructor(...args: any[]) {
         super(...args);
-        this.runtimeErrors = [];
-        this.on?.("runtimeError", (error: { source?: string; stack?: string; text?: string }) => {
-          this.runtimeErrors?.push(error);
-          console.error("[bun-test-cloudflare] Worker runtime error:", error.text ?? "Unknown error");
-          if (error.stack) {
-            console.error(error.stack);
-          }
-        });
-        if (shouldInstallCompatibilityPatch("wrangler-dev-env-force-local")) {
+        if (shouldInstallCompatibilityPatch("wrangler-dev-env-runtime-errors")) {
+          this.runtimeErrors = [];
+          this.on?.("runtimeError", (error: { source?: string; stack?: string; text?: string }) => {
+            this.runtimeErrors?.push(error);
+            console.error("[bun-test-cloudflare] Worker runtime error:", error.text ?? "Unknown error");
+            if (error.stack) {
+              console.error(error.stack);
+            }
+          });
+        }
+        if (
+          shouldInstallCompatibilityPatch("wrangler-dev-env-force-local") ||
+          shouldInstallCompatibilityPatch("wrangler-dev-env-persist")
+        ) {
           this.#installConfigPatch();
         }
         if (shouldInstallCompatibilityPatch("wrangler-dev-env-capture")) {
@@ -149,10 +154,12 @@ const installDevEnvCapture = () => {
               // cannot be simulated locally (for example Flagship). These tests
               // run against Miniflare-local bindings, so force local mode before
               // ConfigController resolves the worker bindings.
-              input.dev.remote = false;
+              if (shouldInstallCompatibilityPatch("wrangler-dev-env-force-local")) {
+                input.dev.remote = false;
+              }
 
               const persistencePath = testHarnessPersistencePathContext.getStore();
-              if (persistencePath) {
+              if (persistencePath && shouldInstallCompatibilityPatch("wrangler-dev-env-persist")) {
                 input.dev.persist = persistencePath;
               }
             }
@@ -166,7 +173,14 @@ const installDevEnvCapture = () => {
 };
 
 export const installWranglerPatches = () => {
-  if (shouldInstallCompatibilityPatch("wrangler-dev-env")) {
+  if (
+    shouldInstallCompatibilityPatchGroup("wrangler-dev-env", [
+      "wrangler-dev-env-runtime-errors",
+      "wrangler-dev-env-capture",
+      "wrangler-dev-env-force-local",
+      "wrangler-dev-env-persist",
+    ])
+  ) {
     installDevEnvCapture();
   }
 };

@@ -1,3 +1,5 @@
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
+
 const webStreamClosedPromiseSymbol = Symbol.for("nodejs.webstream.isClosedPromise");
 const neverClosedWebStream = { promise: new Promise<never>(() => {}) };
 
@@ -93,8 +95,16 @@ export const installWebStreamPatch = () => {
     }
   }
 
-  globalThis.ReadableStream = ReadableStreamWithClosedPromise as typeof ReadableStream;
-  globalThis.WritableStream = WritableStreamWithClosedPromise as typeof WritableStream;
-  patchWebStreamClosedPromiseFallback(NativeReadableStream.prototype);
-  patchWebStreamClosedPromiseFallback(NativeWritableStream.prototype);
+  if (shouldInstallCompatibilityPatch("web-streams-readable-constructor")) {
+    globalThis.ReadableStream = ReadableStreamWithClosedPromise as typeof ReadableStream;
+  }
+  if (shouldInstallCompatibilityPatch("web-streams-writable-constructor")) {
+    globalThis.WritableStream = WritableStreamWithClosedPromise as typeof WritableStream;
+  }
+  if (shouldInstallCompatibilityPatch("web-streams-readable-prototype")) {
+    patchWebStreamClosedPromiseFallback(NativeReadableStream.prototype);
+  }
+  if (shouldInstallCompatibilityPatch("web-streams-writable-prototype")) {
+    patchWebStreamClosedPromiseFallback(NativeWritableStream.prototype);
+  }
 };

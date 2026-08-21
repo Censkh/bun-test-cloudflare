@@ -1,8 +1,11 @@
 import { mock } from "bun:test";
+import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 export const installCloudflareWorkersPatch = () => {
-  mock.module("cloudflare:workers", () => ({
-    DurableObject: class DurableObject {
+  const workersModule: Record<string, unknown> = {};
+
+  if (shouldInstallCompatibilityPatch("cloudflare-workers-durable-object")) {
+    workersModule.DurableObject = class DurableObject {
       protected ctx: unknown;
       protected env: unknown;
 
@@ -10,8 +13,11 @@ export const installCloudflareWorkersPatch = () => {
         this.ctx = ctx;
         this.env = env;
       }
-    },
-    WorkerEntrypoint: class WorkerEntrypoint {
+    };
+  }
+
+  if (shouldInstallCompatibilityPatch("cloudflare-workers-worker-entrypoint")) {
+    workersModule.WorkerEntrypoint = class WorkerEntrypoint {
       protected ctx: unknown;
       protected env: unknown;
 
@@ -19,6 +25,8 @@ export const installCloudflareWorkersPatch = () => {
         this.ctx = ctx;
         this.env = env;
       }
-    },
-  }));
+    };
+  }
+
+  mock.module("cloudflare:workers", () => workersModule);
 };

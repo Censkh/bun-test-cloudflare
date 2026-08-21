@@ -1,11 +1,17 @@
 export const compatibilityPatchNames = [
   "web-streams",
+  "web-streams-readable-constructor",
+  "web-streams-writable-constructor",
+  "web-streams-readable-prototype",
+  "web-streams-writable-prototype",
   "global-caches",
   "global-caches-install",
   "global-caches-default",
   "global-caches-named",
   "child-process-extra-fd",
   "workerd-child-process",
+  "workerd-child-process-unref",
+  "workerd-child-process-stdio-unref",
   "browser-rendering",
   "browser-rendering-spawn",
   "undici",
@@ -32,9 +38,13 @@ export const compatibilityPatchNames = [
   "miniflare-platform-proxy-dispatch",
   "platform-proxy-response-drain",
   "cloudflare-workers",
+  "cloudflare-workers-durable-object",
+  "cloudflare-workers-worker-entrypoint",
   "wrangler-dev-env",
+  "wrangler-dev-env-runtime-errors",
   "wrangler-dev-env-capture",
   "wrangler-dev-env-force-local",
+  "wrangler-dev-env-persist",
 ] as const;
 
 export type CompatibilityPatchName = (typeof compatibilityPatchNames)[number];
@@ -53,14 +63,27 @@ type PatchEnvironment = {
 const bun14: BunVersion = { major: 1, minor: 4, patch: 0 };
 
 const bun14DisabledCompatibilityPatches = new Set<CompatibilityPatchName>([
-  "web-streams",
+  "web-streams-readable-constructor",
+  "web-streams-writable-constructor",
+  "web-streams-readable-prototype",
+  "web-streams-writable-prototype",
+  "child-process-extra-fd",
+  "workerd-child-process-unref",
+  "workerd-child-process-stdio-unref",
   "undici-mark-as-uncloneable",
   "undici-commonjs-require",
   "miniflare-headers",
   "wrangler-guess-worker-format",
+  "miniflare-loopback",
   "miniflare-loopback-launch",
   "miniflare-loopback-close",
+  "miniflare",
+  "miniflare-platform-proxy-dispatch",
+  "platform-proxy-response-drain",
   "global-caches-named",
+  "websocket",
+  "wrangler-dev-env-runtime-errors",
+  "wrangler-dev-env-persist",
 ]);
 
 const parseBunVersion = (version: string | undefined): BunVersion | undefined => {
@@ -132,3 +155,12 @@ export const shouldInstallCompatibilityPatch = (
   environment: PatchEnvironment = process.env as PatchEnvironment,
   bunVersion = process.versions.bun,
 ) => !getDisabledCompatibilityPatches(environment, bunVersion).has(patchName);
+
+export const shouldInstallCompatibilityPatchGroup = (
+  patchName: CompatibilityPatchName,
+  childPatchNames: readonly CompatibilityPatchName[],
+  environment: PatchEnvironment = process.env as PatchEnvironment,
+  bunVersion = process.versions.bun,
+) =>
+  shouldInstallCompatibilityPatch(patchName, environment, bunVersion) &&
+  childPatchNames.some((childPatchName) => shouldInstallCompatibilityPatch(childPatchName, environment, bunVersion));
