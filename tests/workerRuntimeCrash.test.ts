@@ -18,7 +18,7 @@ describe("worker runtime crash", () => {
       const output = `${result.stdout}\n${result.stderr}`;
 
       result.expectStatusCode(0);
-      expect(output).toContain("The Workers runtime crashed unexpectedly and is being restarted");
+      expect(output).toContain("[worker-runtime-crash] crashed workerd pool processes=");
       expect(output).not.toContain("hook timed out");
       expect(output).not.toContain("dangling process");
     },

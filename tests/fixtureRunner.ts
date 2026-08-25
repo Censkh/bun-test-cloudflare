@@ -144,6 +144,7 @@ const beforeBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions 
 type BunFixtureResult = {
   durationMs: number;
   exitCode: number | null;
+  signalCode: string | null;
   stderr: string;
   stdout: string;
   expectStatusCode(expectedStatusCode: number): void;
@@ -158,6 +159,7 @@ const createBunFixtureResult = (
     if (result.exitCode !== expectedStatusCode) {
       console.error(`[fixture:${path.basename(fixtureRoot)}] expected exit code ${expectedStatusCode}`);
       console.error(`[fixture:${path.basename(fixtureRoot)}] actual exit code ${result.exitCode}`);
+      console.error(`[fixture:${path.basename(fixtureRoot)}] signal ${result.signalCode}`);
       if (result.stdout) console.error(result.stdout);
       if (result.stderr) console.error(result.stderr);
     }
@@ -170,8 +172,19 @@ type BunFixtureRunOptions = {
   env?: NodeJS.ProcessEnv;
   fixtureTests?: string[];
   logOutput?: boolean;
+  processTimeoutMs?: number;
   testArgs?: string[];
   timeoutMs?: number;
+};
+
+const getFixtureWranglerVersion = (fixtureRoot: string) => {
+  try {
+    const packageJsonPath = require.resolve("wrangler/package.json", { paths: [fixtureRoot] });
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    return `${packageJson.version} (${packageJsonPath})`;
+  } catch {
+    return "unresolved";
+  }
 };
 
 const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) => {
@@ -180,6 +193,7 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
     return createBunFixtureResult(fixtureRoot, {
       durationMs: performance.now() - start,
       exitCode: 1,
+      signalCode: null,
       stderr: `Fixture ${fixtureRoot} was not prepared. Call beforeBunFixture() while defining the test suite.`,
       stdout: "",
     });
@@ -190,36 +204,58 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
     return createBunFixtureResult(fixtureRoot, {
       durationMs: performance.now() - start,
       exitCode: 1,
+      signalCode: null,
       stderr: `No fixture tests found in ${fixtureRoot}`,
       stdout: "",
     });
   }
 
+  const command = [
+    process.execPath,
+    "test",
+    ...(options.testArgs ?? []),
+    "--timeout",
+    String(options.timeoutMs ?? 10_000),
+    ...fixtureTests,
+  ];
+  const shouldLogOutput = options.logOutput || process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1";
+  if (shouldLogOutput) {
+    console.error(
+      `[fixture:${path.basename(fixtureRoot)}] starting bun=${process.versions.bun} wrangler=${getFixtureWranglerVersion(fixtureRoot)}`,
+    );
+    console.error(`[fixture:${path.basename(fixtureRoot)}] command: ${command.join(" ")}`);
+  }
+
   const result = Bun.spawnSync({
-    cmd: [
-      process.execPath,
-      "test",
-      ...(options.testArgs ?? []),
-      "--timeout",
-      String(options.timeoutMs ?? 10_000),
-      ...fixtureTests,
-    ],
+    cmd: command,
     cwd: fixtureRoot,
     env: { ...process.env, ...options.env },
     stderr: "pipe",
     stdout: "pipe",
+    timeout: options.processTimeoutMs,
   });
   const durationMs = performance.now() - start;
   const stdout = result.stdout.toString();
   const stderr = result.stderr.toString();
+  const timedOut = options.processTimeoutMs !== undefined && durationMs >= options.processTimeoutMs;
+  const exitCode = timedOut ? null : result.exitCode;
+  const signalCode = timedOut ? (result.signalCode ?? "SIGTERM") : (result.signalCode ?? null);
 
-  if (options.logOutput || process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1") {
-    console.error(`[fixture:${path.basename(fixtureRoot)}] ${durationMs.toFixed(1)}ms`);
+  if (shouldLogOutput || exitCode === null) {
+    console.error(
+      `[fixture:${path.basename(fixtureRoot)}] finished in ${durationMs.toFixed(1)}ms exit=${exitCode} signal=${signalCode}`,
+    );
     if (stdout) console.error(stdout);
     if (stderr) console.error(stderr);
   }
 
-  return createBunFixtureResult(fixtureRoot, { durationMs, exitCode: result.exitCode, stderr, stdout });
+  return createBunFixtureResult(fixtureRoot, {
+    durationMs,
+    exitCode,
+    signalCode,
+    stderr,
+    stdout,
+  });
 };
 
 export const bunFixtureTest = (fixtureRoot: string, options: BunFixtureBeforeOptions = {}) => {

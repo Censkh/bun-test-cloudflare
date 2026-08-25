@@ -7,6 +7,8 @@ test("test teardown settles while the whole workerd pool repeatedly crashes", as
     const response = await workers.WORKER.fetch("https://worker-runtime-crash.test/");
 
     expect(await response.text()).toBe("ok");
-    expect(startWorkerdCrashLoop()).toBeGreaterThan(1);
+    const crashedProcessCount = startWorkerdCrashLoop();
+    console.error(`[worker-runtime-crash] crashed workerd pool processes=${crashedProcessCount}`);
+    expect(crashedProcessCount).toBeGreaterThan(1);
   });
 });
