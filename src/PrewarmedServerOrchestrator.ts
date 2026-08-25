@@ -105,7 +105,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       try {
         run = await waitForWarmStart(warmRun);
       } catch (error) {
-        await warmRun.run.close();
+        await warmRun.run.close().catch(() => {});
         discardedRuns += 1;
         if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
           throw error;
@@ -114,7 +114,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       }
 
       if (this.#closed) {
-        await run.close();
+        await run.close().catch(() => {});
         throw new Error("Cloudflare server orchestrator is closed");
       }
 
@@ -125,7 +125,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
         await run.assertUsable();
         break;
       } catch (error) {
-        await run.close();
+        await run.close().catch(() => {});
         discardedRuns += 1;
         if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
           throw error;
@@ -183,7 +183,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     const started = run.start().then(
       () => run,
       async (error) => {
-        await run.close();
+        await run.close().catch(() => {});
         throw error;
       },
     );
@@ -251,7 +251,7 @@ export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> im
     } catch (error) {
       const run = this.#run;
       this.#run = undefined;
-      await run?.close();
+      await run?.close().catch(() => {});
       await release();
       throw error;
     }

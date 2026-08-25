@@ -1,17 +1,20 @@
 import { expect, test } from "bun:test";
-import { unrefWorkerdChildProcess } from "../src/patches/WorkerdChildProcessPatch";
+import { patchWorkerdChildProcess } from "../src/patches/WorkerdChildProcessPatch";
 
 test("keeps workerd's control pipe referenced for graceful shutdown", () => {
   const unrefCalls: string[] = [];
+  const handledErrors: string[] = [];
   const child = {
     stdio: Array.from({ length: 4 }, (_, index) => ({
+      on: (event: string) => handledErrors.push(`${event}-${index}`),
       unref: () => unrefCalls.push(`stdio-${index}`),
     })),
     unref: () => unrefCalls.push("child"),
-  } as unknown as Parameters<typeof unrefWorkerdChildProcess>[0];
+  } as unknown as Parameters<typeof patchWorkerdChildProcess>[0];
 
-  unrefWorkerdChildProcess(child, { stdioUnref: true, unref: true });
+  patchWorkerdChildProcess(child, { stdioErrors: true, stdioUnref: true, unref: true });
 
+  expect(handledErrors).toEqual(["error-0", "error-1", "error-2", "error-3"]);
   expect(unrefCalls).toEqual(["child", "stdio-0", "stdio-1", "stdio-2"]);
 });
 
@@ -22,9 +25,9 @@ test("can disable workerd process and stdio unref independently", () => {
       unref: () => unrefCalls.push(`stdio-${index}`),
     })),
     unref: () => unrefCalls.push("child"),
-  } as unknown as Parameters<typeof unrefWorkerdChildProcess>[0];
+  } as unknown as Parameters<typeof patchWorkerdChildProcess>[0];
 
-  unrefWorkerdChildProcess(child, { stdioUnref: true, unref: false });
+  patchWorkerdChildProcess(child, { stdioErrors: false, stdioUnref: true, unref: false });
 
   expect(unrefCalls).toEqual(["stdio-0", "stdio-1", "stdio-2"]);
 });

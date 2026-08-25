@@ -52,6 +52,7 @@ test("keeps the Bun 1.4 audited patch boundary", () => {
     "global-caches",
     "global-caches-install",
     "global-caches-default",
+    "workerd-child-process-stdio-errors",
     "miniflare-form-data",
     "worker-threads",
     "wrangler-dev-env",

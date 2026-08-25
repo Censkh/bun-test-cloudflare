@@ -42,6 +42,7 @@ installCompatibilityPatch("global-caches", installGlobalCachesBridge);
 installCompatibilityPatch("child-process-extra-fd", installChildProcessExtraFdPatch);
 if (
   shouldInstallCompatibilityPatchGroup("workerd-child-process", [
+    "workerd-child-process-stdio-errors",
     "workerd-child-process-unref",
     "workerd-child-process-stdio-unref",
   ])
