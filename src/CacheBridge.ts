@@ -196,7 +196,7 @@ export const createWorkerCacheStorage = (worker: CacheBridgeWorker, secret: stri
         if (!result.metadata.response) {
           return undefined;
         }
-        const body = result.body instanceof Blob ? result.body : null;
+        const body = result.body instanceof Blob ? await result.body.arrayBuffer() : null;
         return new Response(body, result.metadata.response);
       },
       async put(input: RequestInfo | URL, response: Response) {

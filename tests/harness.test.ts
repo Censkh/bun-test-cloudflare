@@ -36,6 +36,44 @@ const testRoot = await mkdtemp(path.join(os.tmpdir(), "bun-test-cloudflare-harne
 const originalSpawn = Bun.spawn;
 const originalSpawnSync = Bun.spawnSync;
 
+const convertMockBindings = (config: Record<string, any>) => {
+  if (config.__slotEligible) {
+    return { SLOT_ELIGIBLE: { type: "plain_text", value: "true" } };
+  }
+  if (config.d1_databases || config.durable_objects || config.images || config.kv_namespaces || config.r2_buckets) {
+    return {
+      ...(config.d1_databases?.[0] ? { DB: { database_id: config.d1_databases[0].database_id, type: "d1" } } : {}),
+      ...(config.durable_objects?.bindings?.[0]
+        ? {
+            COUNTER: {
+              class_name: config.durable_objects.bindings[0].class_name,
+              type: "durable_object_namespace",
+            },
+          }
+        : {}),
+      ...(config.images ? { IMAGES: { type: "images" } } : {}),
+      ...(config.kv_namespaces?.[0] ? { KV: { id: config.kv_namespaces[0].id, type: "kv_namespace" } } : {}),
+      ...(config.r2_buckets?.[0]
+        ? { BUCKET: { bucket_name: config.r2_buckets[0].bucket_name, type: "r2_bucket" } }
+        : {}),
+      ...(config.vars
+        ? Object.fromEntries(
+            Object.entries(config.vars).map(([name, value]) => [
+              name,
+              typeof value === "string" ? { type: "plain_text", value } : { type: "json", value },
+            ]),
+          )
+        : {}),
+    };
+  }
+  if (config.services?.[0]) {
+    return {
+      EXTERNAL: { service: config.services[0].service, type: "service" },
+    };
+  }
+  return { UNSUPPORTED: { type: "browser" } };
+};
+
 const wranglerMock = {
   createTestHarness: (options: unknown) => {
     lastOptions = options;
@@ -54,10 +92,7 @@ const wranglerMock = {
     rules: [],
     triggers: {},
   }),
-  unstable_convertConfigBindingsToStartWorkerBindings: (config: Record<string, any>) =>
-    config.__slotEligible
-      ? { SLOT_ELIGIBLE: { type: "plain_text", value: "true" } }
-      : { UNSUPPORTED: { type: "browser" } },
+  unstable_convertConfigBindingsToStartWorkerBindings: convertMockBindings,
 };
 
 const createFakeServer = (): FakeServer => ({
