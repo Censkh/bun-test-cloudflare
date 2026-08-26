@@ -15,7 +15,7 @@ const getInlineConfig = (input: WorkerInput) => {
   return input.config as Record<string, any>;
 };
 
-const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: string }, workerNames: Set<string>) => {
+export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: string }, workerNames: Set<string>) => {
   if (binding.type === "d1") return typeof binding.database_id === "string";
   if (binding.type === "kv_namespace") return typeof binding.id === "string";
   if (binding.type === "r2_bucket") return typeof binding.bucket_name === "string";

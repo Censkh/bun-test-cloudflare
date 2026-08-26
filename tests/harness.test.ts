@@ -21,6 +21,8 @@ type FakeServer = {
   getWorker: (name?: string) => FakeWorker;
   listen: () => Promise<{ url: URL }>;
   logs: unknown[];
+  reset: () => Promise<void>;
+  resetCalls: number;
   update: () => Promise<void>;
   updateCalls: number;
   workerEnvs: Record<string, unknown>;
@@ -130,6 +132,10 @@ const createFakeServer = (): FakeServer => ({
     return { url: new URL("http://127.0.0.1:8787") };
   },
   logs: [],
+  async reset() {
+    this.resetCalls += 1;
+  },
+  resetCalls: 0,
   async update() {
     this.updateCalls += 1;
   },
@@ -392,7 +398,7 @@ test("copies explicit additional modules without recursively copying harness bui
   });
 });
 
-test("run starts the server, passes typed workers, and reloads it before reuse", async () => {
+test("run starts the server, passes typed workers, and resets it before reuse", async () => {
   const harness = createCloudflareHarness({
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
@@ -410,6 +416,7 @@ test("run starts the server, passes typed workers, and reloads it before reuse",
 
   expect(result).toBe("ok");
   expect(server.listenCalls).toBe(1);
+  expect(server.resetCalls).toBe(0);
   expect(server.updateCalls).toBe(0);
   expect(server.closeCalls).toBe(0);
 
@@ -418,7 +425,8 @@ test("run starts the server, passes typed workers, and reloads it before reuse",
     expect(currentServer as unknown).toBe(server as unknown);
   });
 
-  expect(server.updateCalls).toBe(2);
+  expect(server.resetCalls).toBe(2);
+  expect(server.updateCalls).toBe(0);
   expect(server.closeCalls).toBe(0);
 });
 

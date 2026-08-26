@@ -130,6 +130,12 @@ Set `BUN_TEST_CLOUDFLARE_TIMINGS=1` to print phase timings for Worker startup, l
 BUN_TEST_CLOUDFLARE_TIMINGS=1 bun test
 ```
 
+## Binding Fixture Coverage
+
+The binding fixture exercises locally simulated value and secret bindings, Analytics Engine, Assets, D1, Durable Objects, Email, Hyperdrive, KV, Queues, R2, Rate Limiting, service bindings, version metadata, and Workflows through `createCloudflareHarness()`. Browser Rendering, Images, Cache API, and Wasm have dedicated fixtures because they require specialized lifecycle or payload coverage.
+
+The same suite catalogs every binding kind emitted by Wrangler's config converter and asserts whether isolated Worker slots may use it. Binding kinds without a deterministic local simulator are configuration-tested and must fall back to the single-slot reset path. When Wrangler adds a new kind, the catalog test fails until its isolation behavior is explicitly classified.
+
 ## OpenNext Applications
 
 Build the Next application with `opennextjs-cloudflare build` before creating the

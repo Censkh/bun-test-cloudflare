@@ -322,6 +322,13 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       platformProxyDispatches: this.#platformProxyDispatches,
     });
     await this.#closeActiveBrowserRenderingSessions();
+    if (this.options.hasBrowserRendering) {
+      await drainHarnessRun({
+        devEnvs: this.#capturedDevEnvs,
+        drainBrowserRendering: true,
+        platformProxyDispatches: this.#platformProxyDispatches,
+      });
+    }
     this.#logStream.flush();
     if (this.canRotateWorkerSlotForReuse()) {
       const slotStartedAt = performance.now();
@@ -331,7 +338,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       logTiming(`${this.#timingLabel} reset:slot`, slotStartedAt);
     } else {
       this.#activeWorkerSlot = 0;
-      await this.#reloadConfiguration();
+      await this.#resetWorkerGeneration();
     }
     this.#server.clearLogs();
     logTiming(`${this.#timingLabel} reset`, startedAt);
@@ -382,43 +389,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     this.#logStream.assertNoWaitUntilFailures();
   }
 
-  async #reloadConfiguration() {
-    if (this.options.workerSlotNames) {
-      await this.#restartWorkerSlotGeneration();
-      return;
-    }
-
-    const updateStartedAt = performance.now();
-    try {
-      await this.#runWithFreshStorage(async () => {
-        try {
-          await this.#server.update((currentOptions) => currentOptions);
-        } catch (error) {
-          if (!isMissingMiniflareDispatcherClose(error)) {
-            throw error;
-          }
-          const restartStartedAt = performance.now();
-          try {
-            await this.#server.listen();
-          } finally {
-            logTiming(`${this.#timingLabel} reset:restart`, restartStartedAt);
-          }
-        }
-      });
-    } finally {
-      logTiming(`${this.#timingLabel} reset:update`, updateStartedAt);
-    }
-
-    this.#workers = this.#getWorkers();
-    const cachesStartedAt = performance.now();
-    try {
-      this.#cacheStorage = await this.#getCacheStorage();
-    } finally {
-      logTiming(`${this.#timingLabel} reset:caches`, cachesStartedAt);
-    }
-  }
-
-  async #restartWorkerSlotGeneration() {
+  async #resetWorkerGeneration() {
     const generationStartedAt = performance.now();
     this.#capturedDevEnvs.length = 0;
     try {
