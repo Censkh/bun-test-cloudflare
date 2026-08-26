@@ -104,6 +104,24 @@ test("calls the backend worker", async () => {
 
 `run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool stays alive until Bun's suite cleanup. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
 
+### Isolated Worker slots
+
+For harnesses that use supported storage, value, Images, internal service, and Durable Object bindings, `isolatedWorkerSlots` can amortize one workerd startup across multiple test runs while preserving Worker global and storage isolation:
+
+```ts
+const harness = createCloudflareHarness({
+  workers: {
+    BACKEND: { configPath: "wrangler.toml" },
+  },
+});
+```
+
+Eligible harnesses use four isolated slots by default. Each slot is a distinct Worker service with namespaced Cache API access and unique D1, KV, and R2 storage identities. A slot is leased once. After every slot in a workerd generation has been consumed, the harness rebuilds that generation in the background. Harnesses with unsupported bindings automatically use the single-slot reset path; explicitly requesting multiple slots with unsupported bindings throws.
+
+`prewarmedWorkerdPoolSize` defaults to `1`, avoiding duplicate startup and memory costs. Set it to `2` or higher only when tests need concurrent harness leases; another ready pool member can then serve leases while a generation rebuilds.
+
+Use the `workers` handles, `server.fetch()`, or `server.getWorker()` supplied to `run()` so requests follow the active slot. A URL returned by `server.listen()` addresses the generation's first physical Worker and should not be used with slotted harnesses.
+
 ## Profile Harness Time
 
 Set `BUN_TEST_CLOUDFLARE_TIMINGS=1` to print phase timings for Worker startup, lease acquisition, callback execution, storage reset, and cleanup. Fixture tests also forward their captured Worker timing logs in this mode.

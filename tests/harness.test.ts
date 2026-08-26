@@ -44,6 +44,7 @@ const wranglerMock = {
     return server;
   },
   unstable_readConfig: ({ config }: { config: string }) => ({
+    __slotEligible: config.includes("eligible"),
     compatibility_date: "2025-08-15",
     define: {
       "process.env.NODE_ENV": "'production'",
@@ -53,6 +54,10 @@ const wranglerMock = {
     rules: [],
     triggers: {},
   }),
+  unstable_convertConfigBindingsToStartWorkerBindings: (config: Record<string, any>) =>
+    config.__slotEligible
+      ? { SLOT_ELIGIBLE: { type: "plain_text", value: "true" } }
+      : { UNSUPPORTED: { type: "browser" } },
 };
 
 const createFakeServer = (): FakeServer => ({
@@ -378,7 +383,7 @@ test("run starts the server, passes typed workers, and reloads it before reuse",
     expect(currentServer as unknown).toBe(server as unknown);
   });
 
-  expect(server.updateCalls).toBe(1);
+  expect(server.updateCalls).toBe(2);
   expect(server.closeCalls).toBe(0);
 });
 
@@ -435,6 +440,7 @@ test("run executes events.beforeRun inside the async run context", async () => {
 
 test("parallel run calls use independent servers", async () => {
   const harness = createCloudflareHarness({
+    prewarmedWorkerdPoolSize: 2,
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
     },
@@ -507,6 +513,35 @@ test("prewarms the configured server pool and refills it after a lease is releas
 
   await closePrewarmedServerOrchestrators();
   expect(harnessServers.every((server) => server.closeCalls === 1)).toBe(true);
+});
+
+test("supports a configured prewarmed workerd pool size", async () => {
+  const serversBefore = createdServers.length;
+  const harness = createCloudflareHarness({
+    prewarmedWorkerdPoolSize: 2,
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
+    },
+  });
+
+  expect(createdServers.slice(serversBefore)).toHaveLength(2);
+  await harness.run(() => {});
+  expect(createdServers.slice(serversBefore)).toHaveLength(2);
+});
+
+test("uses four isolated slots and one prewarmed workerd by default when eligible", () => {
+  const serversBefore = createdServers.length;
+  createCloudflareHarness({
+    workers: {
+      BACKEND: {
+        configPath: "./wrangler.eligible.toml",
+        name: "backend-worker",
+      },
+    },
+  });
+
+  expect(createdServers.slice(serversBefore)).toHaveLength(1);
+  expect((lastOptions as { workers: unknown[] }).workers).toHaveLength(4);
 });
 
 test("discards stale prewarmed servers before leasing them", async () => {

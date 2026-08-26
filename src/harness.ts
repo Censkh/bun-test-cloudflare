@@ -20,11 +20,17 @@ import {
   HarnessRun,
   type PreparedWorkerInput,
 } from "./HarnessRun";
-import { closePrewarmedServerOrchestrators, PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
+import {
+  closePrewarmedServerOrchestrators,
+  PrewarmedServerOrchestrator,
+  WARM_WORKERD_POOL_SIZE,
+} from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator } from "./ServerOrchestrator";
+import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
+const DEFAULT_ISOLATED_WORKER_SLOTS = 4;
 
 export type TypeToken<T> = {
   readonly __type?: T;
@@ -50,6 +56,8 @@ export type CloudflareHarnessConfig<TWorkers extends Record<string, CloudflareWo
   events?: {
     beforeRun?: (workers: CloudflareWorkerMap<TWorkers>, server: TestHarness) => Promise<void> | void;
   };
+  isolatedWorkerSlots?: number;
+  prewarmedWorkerdPoolSize?: number;
   workers: TWorkers;
 };
 
@@ -628,29 +636,57 @@ const prepareWorkerInput = (
 export const createCloudflareHarness = <const TWorkers extends Record<string, CloudflareWorkerConfig>>(
   config: CloudflareHarnessConfig<TWorkers>,
 ): CloudflareHarness<TWorkers> => {
-  const { events, workers: workerConfigs, ...serverConfig } = config;
+  const {
+    events,
+    isolatedWorkerSlots: configuredIsolatedWorkerSlots,
+    prewarmedWorkerdPoolSize = WARM_WORKERD_POOL_SIZE,
+    workers: workerConfigs,
+    ...serverConfig
+  } = config;
+  if (
+    configuredIsolatedWorkerSlots !== undefined &&
+    (!Number.isInteger(configuredIsolatedWorkerSlots) || configuredIsolatedWorkerSlots < 1)
+  ) {
+    throw new TypeError("isolatedWorkerSlots must be a positive integer");
+  }
+  if (!Number.isInteger(prewarmedWorkerdPoolSize) || prewarmedWorkerdPoolSize < 1) {
+    throw new TypeError("prewarmedWorkerdPoolSize must be a positive integer");
+  }
   const workerEntries = Object.entries(workerConfigs) as Array<[keyof TWorkers, CloudflareWorkerConfig]>;
   const preparedWorkers = workerEntries.map(([key, worker]) =>
     prepareWorkerInput(String(key), worker, serverConfig.root),
   );
+  const supportsIsolatedWorkerSlots =
+    configuredIsolatedWorkerSlots === 1 ? false : canUseIsolatedWorkerSlots(preparedWorkers);
+  const isolatedWorkerSlots =
+    configuredIsolatedWorkerSlots ?? (supportsIsolatedWorkerSlots ? DEFAULT_ISOLATED_WORKER_SLOTS : 1);
+
+  if (isolatedWorkerSlots > 1 && !supportsIsolatedWorkerSlots) {
+    throw new TypeError("isolatedWorkerSlots does not support one or more configured Worker bindings");
+  }
+
+  const workerSlots =
+    isolatedWorkerSlots > 1 ? createIsolatedWorkerSlots(preparedWorkers, isolatedWorkerSlots) : undefined;
 
   const testHarnessOptions = {
     ...serverConfig,
-    workers: preparedWorkers.map((worker) => worker.input),
+    workers: workerSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
   };
   const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
+      cacheBridgeSecret: workerSlots?.secret,
       events,
       hasBrowserRendering,
       preparedWorkers,
       testHarnessOptions,
       workerEntries,
+      workerSlotNames: workerSlots?.workerNames,
     });
   const orchestrator =
     process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
       ? new InlineServerOrchestrator(createRun)
-      : new PrewarmedServerOrchestrator(createRun);
+      : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize);
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
 
   return {

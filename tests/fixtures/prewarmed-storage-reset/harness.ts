@@ -8,6 +8,8 @@ export type StorageEnv = {
 };
 
 export const harness = createCloudflareHarness({
+  isolatedWorkerSlots: Number(process.env.BUN_TEST_CLOUDFLARE_TEST_WORKER_SLOTS ?? 2),
+  prewarmedWorkerdPoolSize: 2,
   workers: {
     WORKER: {
       bindings: typeToken<StorageEnv>(),

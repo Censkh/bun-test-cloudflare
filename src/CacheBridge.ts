@@ -10,6 +10,33 @@ type CloudflareCacheStorage = CacheStorage & {
   default: Cache;
 };
 
+type CacheBridgeWorker = {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+};
+
+type SerializedCacheRequest = {
+  headers: Array<[string, string]>;
+  method: string;
+  url: string;
+};
+
+type SerializedCacheResponse = {
+  headers: Array<[string, string]>;
+  status: number;
+  statusText: string;
+};
+
+type CacheBridgeMetadata = {
+  cacheName?: string;
+  operation: "delete" | "match" | "put";
+  options?: CacheQueryOptions;
+  request: SerializedCacheRequest;
+  response?: SerializedCacheResponse;
+};
+
+export const WORKER_CACHE_BRIDGE_PATH = "/__bun-test-cloudflare/cache";
+export const WORKER_CACHE_BRIDGE_SECRET_HEADER = "x-bun-test-cloudflare-cache-secret";
+
 type CapturedDevEnvWithRuntime = CapturedDevEnv & {
   runtimes?: Array<{ mf?: RuntimeMiniflare }>;
 };
@@ -112,4 +139,89 @@ export const getCapturedRuntimeCaches = async (devEnvs: CapturedDevEnv[]) => {
       return await miniflare.getCaches();
     }
   }
+};
+
+const serializeCacheRequest = (input: RequestInfo | URL): SerializedCacheRequest => {
+  const request = input instanceof Request ? input : new Request(input);
+  return {
+    headers: [...request.headers],
+    method: request.method,
+    url: request.url,
+  };
+};
+
+const createCacheBridgeForm = (metadata: CacheBridgeMetadata, body?: Blob) => {
+  const form = new FormData();
+  form.set("metadata", JSON.stringify(metadata));
+  if (body) {
+    form.set("body", body, "body");
+  }
+  return form;
+};
+
+const readCacheBridgeMetadata = async <T>(response: Response) => {
+  if (!response.ok) {
+    throw new Error(`Worker cache bridge failed with HTTP ${response.status}: ${await response.text()}`);
+  }
+  const form = await response.formData();
+  const metadata = form.get("metadata");
+  if (typeof metadata !== "string") {
+    throw new Error("Worker cache bridge returned invalid metadata");
+  }
+  return { body: form.get("body"), metadata: JSON.parse(metadata) as T };
+};
+
+export const createWorkerCacheStorage = (worker: CacheBridgeWorker, secret: string): CacheStorage => {
+  const requestBridge = (form: FormData) =>
+    worker.fetch(`https://bun-test-cloudflare.invalid${WORKER_CACHE_BRIDGE_PATH}`, {
+      body: form,
+      headers: { [WORKER_CACHE_BRIDGE_SECRET_HEADER]: secret },
+      method: "POST",
+    });
+
+  const createCache = (cacheName?: string) =>
+    ({
+      async delete(input: RequestInfo | URL, options?: CacheQueryOptions) {
+        const response = await requestBridge(
+          createCacheBridgeForm({ cacheName, operation: "delete", options, request: serializeCacheRequest(input) }),
+        );
+        const result = await readCacheBridgeMetadata<{ deleted: boolean }>(response);
+        return result.metadata.deleted;
+      },
+      async match(input: RequestInfo | URL, options?: CacheQueryOptions) {
+        const response = await requestBridge(
+          createCacheBridgeForm({ cacheName, operation: "match", options, request: serializeCacheRequest(input) }),
+        );
+        const result = await readCacheBridgeMetadata<{ response?: SerializedCacheResponse }>(response);
+        if (!result.metadata.response) {
+          return undefined;
+        }
+        const body = result.body instanceof Blob ? result.body : null;
+        return new Response(body, result.metadata.response);
+      },
+      async put(input: RequestInfo | URL, response: Response) {
+        const responseBody = await response.blob();
+        const bridgeResponse = await requestBridge(
+          createCacheBridgeForm(
+            {
+              cacheName,
+              operation: "put",
+              request: serializeCacheRequest(input),
+              response: {
+                headers: [...response.headers],
+                status: response.status,
+                statusText: response.statusText,
+              },
+            },
+            responseBody,
+          ),
+        );
+        await readCacheBridgeMetadata(bridgeResponse);
+      },
+    }) as unknown as Cache;
+
+  return {
+    default: createCache(),
+    open: async (cacheName: string) => createCache(cacheName),
+  } as CloudflareCacheStorage;
 };
