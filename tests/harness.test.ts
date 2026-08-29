@@ -34,6 +34,7 @@ let lastOptions: unknown;
 const spawnedCommands: string[][] = [];
 const spawnedTimeouts: Array<number | undefined> = [];
 let timedOutWranglerBuildsRemaining = 0;
+let timedOutWranglerExitCode: null | 0 = null;
 const testRoot = await mkdtemp(path.join(os.tmpdir(), "bun-test-cloudflare-harness-"));
 const originalSpawn = Bun.spawn;
 const originalSpawnSync = Bun.spawnSync;
@@ -160,7 +161,7 @@ Bun.spawnSync = ((options: { cmd: string[]; timeout?: number }) => {
   if (options.cmd.includes("deploy") && options.cmd.includes("--dry-run") && timedOutWranglerBuildsRemaining > 0) {
     timedOutWranglerBuildsRemaining -= 1;
     return {
-      exitCode: null,
+      exitCode: timedOutWranglerExitCode,
       signalCode: "SIGTERM",
       stderr: Buffer.from(""),
       stdout: Buffer.from(""),
@@ -339,6 +340,30 @@ test("retries a timed-out Wrangler dry-run build", async () => {
   expect(retryCommands).toHaveLength(2);
   expect(retryCommands.every((command) => command.includes("--dry-run"))).toBe(true);
   expect(spawnedTimeouts.slice(timeoutStart)).toEqual([10_000, 10_000]);
+});
+
+test("retries when Bun reports a timed-out Wrangler build with exit code zero", async () => {
+  const commandStart = spawnedCommands.length;
+  timedOutWranglerBuildsRemaining = 1;
+  timedOutWranglerExitCode = 0;
+
+  const harness = createCloudflareHarness({
+    root: testRoot,
+    workers: {
+      BACKEND: {
+        config: {
+          compatibility_date: "2025-08-15",
+          main: "src/backend.ts",
+          name: "zero-exit-timeout-backend",
+        },
+      },
+    },
+  });
+
+  await harness.run(() => {});
+
+  expect(spawnedCommands.slice(commandStart)).toHaveLength(2);
+  timedOutWranglerExitCode = null;
 });
 
 test("copies explicit additional modules without recursively copying harness build output", async () => {

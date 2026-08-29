@@ -338,11 +338,11 @@ const runWranglerDryRun = (configPath: string, outdir: string, env: string | und
     const stdout = result.stdout.toString();
     const stderr = result.stderr.toString();
 
-    if (result.exitCode === 0) {
+    const timedOut = result.signalCode === "SIGTERM";
+    if (!timedOut && result.exitCode === 0) {
       return;
     }
 
-    const timedOut = result.signalCode === "SIGTERM";
     if (timedOut && attempt < buildRetryCount && getRemainingBuildTimeMs(deadline) > 0) {
       sleepSync(Math.min(buildRetryDelayMs, getRemainingBuildTimeMs(deadline)));
       continue;

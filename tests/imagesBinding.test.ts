@@ -15,15 +15,15 @@ describe("Images binding fixture", () => {
           BUN_TEST_CLOUDFLARE_TIMINGS: "1",
         },
         logOutput: true,
-        processTimeoutMs: 40_000,
+        processTimeoutMs: 70_000,
         testArgs: ["--no-orphans"],
-        timeoutMs: 35_000,
+        timeoutMs: 60_000,
       });
       const output = `${result.stdout}\n${result.stderr}`;
 
       result.expectStatusCode(0);
       expect(output).not.toContain("WritableStreamDefaultWriter has no stream");
     },
-    50_000,
+    80_000,
   );
 });

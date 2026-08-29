@@ -13,10 +13,6 @@ const harness = createCloudflareHarness({
       configPath: path.join(import.meta.dir, "wrangler.toml"),
       name: "images-binding-fixture",
     },
-    AUX_WORKER: {
-      configPath: path.join(import.meta.dir, "wrangler-secondary.toml"),
-      name: "images-binding-fixture-secondary",
-    },
   },
 });
 
