@@ -4,7 +4,8 @@ import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 const browserRenderingProfilePathPattern = /[/\\]miniflare-[^/\\]+[/\\]browser-rendering[/\\]profile-/;
 const devtoolsEndpointPattern = /DevTools listening on ws:\/\//;
-const browserLaunchStartupTimeoutMs = 15_000;
+const browserLaunchStartupTimeoutMs = 30_000;
+const browserLaunchTerminationTimeoutMs = 5_000;
 const pendingBrowserLaunches = new Set<Promise<void>>();
 const pendingBrowserLaunchRequests = new Set<Promise<void>>();
 const pendingBrowserLaunchRequestSettlers: Array<() => void> = [];
@@ -51,7 +52,10 @@ export const trackBrowserRenderingLaunchRequest = (response: http.ServerResponse
   request.finally(() => pendingBrowserLaunchRequests.delete(request)).catch(() => {});
 };
 
-const trackBrowserLaunch = (child: childProcess.ChildProcess) => {
+export const trackBrowserLaunch = (
+  child: childProcess.ChildProcess,
+  startupTimeoutMs = browserLaunchStartupTimeoutMs,
+) => {
   observedBrowserRenderingLaunchCount += 1;
   settleOneBrowserLaunchRequest();
 
@@ -69,9 +73,18 @@ const trackBrowserLaunch = (child: childProcess.ChildProcess) => {
     resolveLaunch();
   };
 
-  const timeout = setTimeout(settle, browserLaunchStartupTimeoutMs);
+  let terminationTimeout: ReturnType<typeof setTimeout> | undefined;
+  const timeout = setTimeout(() => {
+    child.kill();
+    terminationTimeout = setTimeout(() => child.kill("SIGKILL"), browserLaunchTerminationTimeoutMs);
+    terminationTimeout.unref?.();
+  }, startupTimeoutMs);
+  timeout.unref?.();
   const settleWithCleanup = () => {
     clearTimeout(timeout);
+    if (terminationTimeout) {
+      clearTimeout(terminationTimeout);
+    }
     settle();
   };
 
