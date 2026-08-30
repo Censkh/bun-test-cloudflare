@@ -21,7 +21,10 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
   ).toBeTrue();
 });
 
-test("isolated Worker slots reject unsupported and unidentified storage bindings", () => {
+test("isolated Worker slots accept compiled WASM and reject unsupported storage bindings", () => {
+  expect(
+    canUseIsolatedWorkerSlots([workerInput({ rules: [{ globs: ["**/*.wasm"], type: "CompiledWasm" }] })]),
+  ).toBeTrue();
   expect(
     canUseIsolatedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
   ).toBeFalse();

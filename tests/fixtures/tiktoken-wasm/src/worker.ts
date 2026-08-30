@@ -3,6 +3,7 @@ import { init, Tiktoken } from "tiktoken/lite/init";
 import wasm from "tiktoken/lite/tiktoken_bg.wasm";
 
 let initPromise: Promise<void> | undefined;
+let instanceRequestCount = 0;
 
 const initTiktoken = () => {
   initPromise ??= init((imports) => WebAssembly.instantiate(wasm, imports));
@@ -11,6 +12,7 @@ const initTiktoken = () => {
 
 export default {
   async fetch(request: Request): Promise<Response> {
+    instanceRequestCount += 1;
     await initTiktoken();
 
     const url = new URL(request.url);
@@ -19,7 +21,7 @@ export default {
 
     try {
       const tokens = encoder.encode(text);
-      return Response.json({ tokenCount: tokens.length, tokens: Array.from(tokens) });
+      return Response.json({ instanceRequestCount, tokenCount: tokens.length, tokens: Array.from(tokens) });
     } finally {
       encoder.free();
     }

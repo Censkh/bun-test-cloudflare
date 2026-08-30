@@ -108,10 +108,19 @@ const withTestEnvironmentDefine = (config: Record<string, any>) => {
   };
 };
 
-const withDryRunModuleRules = (rules: Array<Record<string, any>> | undefined) => [
-  ...(rules ?? []),
-  { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
-];
+const directoryContainsWasm = (directory: string): boolean =>
+  readdirSync(directory, { withFileTypes: true }).some((entry) => {
+    const entryPath = path.join(directory, entry.name);
+    return entry.isDirectory() ? directoryContainsWasm(entryPath) : /\.wasm(?:\?module)?$/.test(entry.name);
+  });
+
+const withDryRunModuleRules = (rules: Array<Record<string, any>> | undefined, outdir: string) => {
+  const configuredRules = rules ?? [];
+  if (configuredRules.some((rule) => rule.type === "CompiledWasm") || !directoryContainsWasm(outdir)) {
+    return configuredRules;
+  }
+  return [...configuredRules, { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] }];
+};
 
 const withDryRunBuildConfig = (config: Record<string, any>) => ({
   ...config,
@@ -689,7 +698,7 @@ const prepareWorkerInput = (
         find_additional_modules: true,
         main: buildResult.builtMain,
         no_bundle: true,
-        rules: withDryRunModuleRules(config.rules),
+        rules: withDryRunModuleRules(config.rules, outdir),
       },
       ...(vars ? { vars } : {}),
       ...(secrets ? { secrets } : {}),
