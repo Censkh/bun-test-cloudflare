@@ -36,7 +36,11 @@ export const canUseIsolatedWorkerSlots = (workers: Array<{ input: WorkerInput; n
   const workerNames = new Set(workers.map((worker) => worker.name));
   try {
     return workers.every(({ input }) => {
-      const bindings = unstable_convertConfigBindingsToStartWorkerBindings(getInlineConfig(input));
+      const config = getInlineConfig(input);
+      if (Array.isArray(config.containers) && config.containers.length > 0) {
+        return false;
+      }
+      const bindings = unstable_convertConfigBindingsToStartWorkerBindings(config);
       return Object.values(bindings).every((binding) =>
         isSupportedSlotBinding(binding as { [key: string]: unknown; type: string }, workerNames),
       );
@@ -211,6 +215,15 @@ const createSlotInput = (
         ...appendSlotProperty(binding, "preview_id", slot),
       })),
       main,
+      migrations: config.migrations?.map((migration: Record<string, any>) => ({
+        ...migration,
+        transferred_classes: migration.transferred_classes?.map((transfer: Record<string, any>) => ({
+          ...transfer,
+          ...(typeof transfer.from_script === "string" && slotWorkerNames.has(transfer.from_script)
+            ? { from_script: slotWorkerNames.get(transfer.from_script) }
+            : {}),
+        })),
+      })),
       name: slotWorkerName,
       r2_buckets: config.r2_buckets?.map((binding: Record<string, any>) => ({
         ...binding,

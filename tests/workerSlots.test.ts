@@ -26,6 +26,36 @@ test("isolated Worker slots reject unsupported and unidentified storage bindings
     canUseIsolatedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
   ).toBeFalse();
   expect(canUseIsolatedWorkerSlots([workerInput({ kv_namespaces: [{ binding: "KV" }] })])).toBeFalse();
+  expect(canUseIsolatedWorkerSlots([workerInput({ containers: [{ class_name: "ContainerWorker" }] })])).toBeFalse();
+});
+
+test("isolated Worker slots support cyclic Worker bindings", () => {
+  const workers = [
+    {
+      input: {
+        config: {
+          durable_objects: {
+            bindings: [{ class_name: "SecondObject", name: "SECOND_OBJECT", script_name: "second-worker" }],
+          },
+          services: [{ binding: "SECOND", service: "second-worker" }],
+        },
+      } as any,
+      name: "first-worker",
+    },
+    {
+      input: {
+        config: {
+          durable_objects: {
+            bindings: [{ class_name: "FirstObject", name: "FIRST_OBJECT", script_name: "first-worker" }],
+          },
+          services: [{ binding: "FIRST", service: "first-worker" }],
+        },
+      } as any,
+      name: "second-worker",
+    },
+  ];
+
+  expect(canUseIsolatedWorkerSlots(workers)).toBeTrue();
 });
 
 test("isolated Worker slots rewrite internal service and Durable Object targets", () => {
@@ -43,6 +73,12 @@ test("isolated Worker slots rewrite internal service and Durable Object targets"
                 bindings: [{ class_name: "Counter", name: "COUNTER", script_name: "service-worker" }],
               },
               main,
+              migrations: [
+                {
+                  tag: "v1",
+                  transferred_classes: [{ from: "Counter", from_script: "service-worker", to: "TransferredCounter" }],
+                },
+              ],
               name: "entry-worker",
               services: [{ binding: "SERVICE", service: "service-worker" }],
             },
@@ -62,6 +98,7 @@ test("isolated Worker slots rewrite internal service and Durable Object targets"
     expect(firstEntryConfig.services[0].service).toBe("service-worker--btcf-slot-0");
     expect(secondEntryConfig.services[0].service).toBe("service-worker--btcf-slot-1");
     expect(firstEntryConfig.durable_objects.bindings[0].script_name).toBe("service-worker--btcf-slot-0");
+    expect(firstEntryConfig.migrations[0].transferred_classes[0].from_script).toBe("service-worker--btcf-slot-0");
   } finally {
     fs.rmSync(root, { force: true, recursive: true });
   }
