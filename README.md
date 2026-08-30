@@ -17,8 +17,6 @@ The setup installs only the Bun/Miniflare compatibility patches still needed for
 bun add -d bun-test-cloudflare
 ```
 
-For a workspace package, use:
-
 ## Wrangler Compatibility
 
 `bun-test-cloudflare` requires `wrangler >= 4.104.0`.
