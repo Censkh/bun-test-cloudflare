@@ -4,7 +4,7 @@
   "type": "module",
   "devDependencies": {
     "payload": "3.85.1",
-    "typescript": "7.0.1-rc",
+    "typescript": "7.0.2",
     "wrangler": "4.105.0"
   }
 }
