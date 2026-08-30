@@ -1,0 +1,3 @@
+name = "worker-runtime-crash"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"

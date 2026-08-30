@@ -13,20 +13,61 @@ const harness = createCloudflareHarness({
       configPath: path.join(import.meta.dir, "wrangler.toml"),
       name: "images-binding-fixture",
     },
-    AUX_WORKER: {
-      configPath: path.join(import.meta.dir, "wrangler-secondary.toml"),
-      name: "images-binding-fixture-secondary",
-    },
   },
 });
 
 const png1x1 = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAAXNSR0IB2cksfwAAAAZQTFRFAAAApaPEY/fPxwAAAAJ0Uk5TAP9bkSK1AAAACklEQVR4nGNoAAAAggCBd81ytgAAAAA=",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
   "base64",
 );
 const gif1x1 = Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64");
 const maxImageUploadBytes = 10 * 1024 * 1024;
+const pngEndChunkByteLength = 12;
+
+const createOversizedPng = () => {
+  const endChunkOffset = png1x1.byteLength - pngEndChunkByteLength;
+  if (png1x1.subarray(endChunkOffset + 4, endChunkOffset + 8).toString() !== "IEND") {
+    throw new Error("fixture PNG does not end with an IEND chunk");
+  }
+
+  const chunkType = Buffer.from("btCf");
+  const chunkData = Buffer.alloc(maxImageUploadBytes + 1);
+  const chunkLength = Buffer.alloc(4);
+  chunkLength.writeUInt32BE(chunkData.byteLength);
+  const chunkCrc = Buffer.alloc(4);
+  chunkCrc.writeUInt32BE(Bun.hash.crc32(Buffer.concat([chunkType, chunkData])) >>> 0);
+
+  return Buffer.concat([
+    png1x1.subarray(0, endChunkOffset),
+    chunkLength,
+    chunkType,
+    chunkData,
+    chunkCrc,
+    png1x1.subarray(endChunkOffset),
+  ]);
+};
+
+const oversizedPng = createOversizedPng();
 const imageBindingTimingsEnabled = process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1";
+const imageBindingTimingOrigin = performance.now();
+const activeImageBindingOperations = new Map<number, { label: string; startedAt: number }>();
+let nextImageBindingOperationId = 0;
+
+if (imageBindingTimingsEnabled) {
+  const activeOperationInterval = setInterval(() => {
+    if (activeImageBindingOperations.size === 0) return;
+
+    const now = performance.now();
+    const activeOperations = [...activeImageBindingOperations.values()]
+      .map(({ label, startedAt }) => `${label}=${(now - startedAt).toFixed(0)}ms`)
+      .join(", ");
+    const memoryUsage = process.memoryUsage();
+    process.stderr.write(
+      `[images-binding] +${(now - imageBindingTimingOrigin).toFixed(0)}ms active: ${activeOperations}; rss=${Math.round(memoryUsage.rss / 1024 / 1024)}MiB\n`,
+    );
+  }, 5_000);
+  activeOperationInterval.unref();
+}
 
 const logImageBindingTiming = (label: string, startedAt: number) => {
   if (!imageBindingTimingsEnabled) return;
@@ -35,12 +76,15 @@ const logImageBindingTiming = (label: string, startedAt: number) => {
 
 const timeImageBindingOperation = async <T>(label: string, callback: () => Promise<T>): Promise<T> => {
   const startedAt = performance.now();
+  const operationId = nextImageBindingOperationId++;
+  activeImageBindingOperations.set(operationId, { label, startedAt });
   if (imageBindingTimingsEnabled) {
     process.stderr.write(`[images-binding] ${label}: started\n`);
   }
   try {
     return await callback();
   } finally {
+    activeImageBindingOperations.delete(operationId);
     logImageBindingTiming(label, startedAt);
   }
 };
@@ -99,7 +143,7 @@ const isUnsupportedGifOutputError = (error: unknown) =>
 
 const prepareOversizedInput = async (env: ImagesEnv, format: (typeof imageFormats)[number]) => {
   if (format.mimeType === "image/png") {
-    return padOverUploadLimit(png1x1);
+    return oversizedPng;
   }
   if (format.mimeType === "image/gif") {
     return padOverUploadLimit(gif1x1);

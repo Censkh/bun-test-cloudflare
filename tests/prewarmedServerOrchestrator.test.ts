@@ -116,7 +116,7 @@ test("prewarmed server acquire skips stuck warm runs", async () => {
   }
 });
 
-test("prewarmed server reloads a returned run before its next lease", async () => {
+test("prewarmed server resets returned runs in the background", async () => {
   const events: string[] = [];
   let createdRuns = 0;
   const orchestrator = new PrewarmedServerOrchestrator<any>(() => {
@@ -125,6 +125,7 @@ test("prewarmed server reloads a returned run before its next lease", async () =
       assertUsable: async () => {
         events.push(`usable:${runId}`);
       },
+      canRotateWorkerSlotForReuse: () => true,
       close: async () => {},
       flushLogs: () => {},
       resetForReuse: async () => {
@@ -145,7 +146,87 @@ test("prewarmed server reloads a returned run before its next lease", async () =
     await orchestrator.close();
   }
 
-  expect(events).toEqual(["usable:0", "usable:1", "reset:0", "usable:0"]);
+  expect(events.slice(0, 5)).toEqual(["usable:0", "reset:0", "usable:0", "reset:0", "usable:0"]);
+});
+
+test("prewarmed server release does not wait for a background reset", async () => {
+  let finishReset!: () => void;
+  const resetFinished = new Promise<void>((resolve) => {
+    finishReset = resolve;
+  });
+  let createdRuns = 0;
+  let resetStarted = false;
+  const orchestrator = new PrewarmedServerOrchestrator<any>(() => {
+    const runId = createdRuns++;
+    return {
+      assertUsable: async () => {},
+      close: async () => {},
+      flushLogs: () => {},
+      resetForReuse: async () => {
+        if (runId === 0) {
+          resetStarted = true;
+          await resetFinished;
+        }
+      },
+      start: async () => {},
+    } as any;
+  }, 2);
+
+  try {
+    const firstLease = await orchestrator.acquire();
+    await firstLease.release();
+
+    expect(resetStarted).toBe(true);
+    const secondLease = await orchestrator.acquire();
+    expect(secondLease.run).not.toBe(firstLease.run);
+    finishReset();
+    await secondLease.release();
+  } finally {
+    finishReset();
+    await orchestrator.close();
+  }
+});
+
+test("prewarmed server replaces an unusable run when its cleanup rejects", async () => {
+  const events: string[] = [];
+  let createdRuns = 0;
+  const orchestrator = new PrewarmedServerOrchestrator<any>(() => {
+    const runId = createdRuns++;
+    return {
+      assertUsable: async () => {
+        events.push(`usable:${runId}`);
+      },
+      close: async () => {
+        events.push(`closed:${runId}`);
+        if (runId === 0) {
+          throw new Error("runtime cleanup failed");
+        }
+      },
+      flushLogs: () => {},
+      resetForReuse: async () => {
+        events.push(`reset:${runId}`);
+        if (runId === 0) {
+          throw new Error("runtime crashed");
+        }
+      },
+      start: async () => {},
+    } as any;
+  });
+
+  try {
+    const firstLease = await orchestrator.acquire();
+    await firstLease.release();
+    const secondLease = await orchestrator.acquire();
+    await secondLease.release();
+    const thirdLease = await orchestrator.acquire();
+    await thirdLease.release();
+  } finally {
+    await orchestrator.close();
+  }
+
+  expect(events).toContain("reset:0");
+  expect(events).toContain("closed:0");
+  expect(events).toContain("usable:1");
 });
 
 test("reusable server leases reset one live harness instead of recreating it", async () => {

@@ -1,0 +1,35 @@
+name = "binding-types-slotted"
+main = "src/slotted.ts"
+compatibility_date = "2025-08-15"
+
+[vars]
+TEXT_VALUE = "slot-value"
+JSON_VALUE = { enabled = true }
+
+[images]
+binding = "IMAGES"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "binding-types-slotted"
+database_id = "binding-types-slotted"
+
+[[durable_objects.bindings]]
+name = "COUNTER"
+class_name = "SlotCounter"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "binding-types-slotted"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SlotCounter"]
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "binding-types-slotted"
+
+[[services]]
+binding = "SERVICE"
+service = "binding-types-slot-service"

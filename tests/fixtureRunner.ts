@@ -5,6 +5,7 @@ import path from "node:path";
 export const fixturePath = (testDir: string, fixtureName: string) => path.join(testDir, "fixtures", fixtureName);
 
 const packageRoot = path.resolve(import.meta.dir, "..");
+const fixturePreparationLockTimeoutMs = 60_000;
 
 type BunFixtureBeforeOptions = {
   env?: NodeJS.ProcessEnv;
@@ -13,9 +14,47 @@ type BunFixtureBeforeOptions = {
 
 const preparedFixtureRoots = new Set<string>();
 
+const sleepSync = (durationMs: number) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs);
+};
+
+const getFixturePackageLinkPath = (fixtureRoot: string) =>
+  path.join(fixtureRoot, "node_modules", "bun-test-cloudflare");
+
+const isFixturePrepared = (fixtureRoot: string) => fs.existsSync(getFixturePackageLinkPath(fixtureRoot));
+
+const withFixturePreparationLock = <TResult>(fixtureRoot: string, callback: () => TResult) => {
+  const lockPath = path.join(fixtureRoot, ".bun-test-cloudflare-prepare.lock");
+  const deadline = Date.now() + fixturePreparationLockTimeoutMs;
+  let lockFile: number | undefined;
+
+  while (lockFile === undefined && Date.now() < deadline) {
+    try {
+      lockFile = fs.openSync(lockPath, "wx");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+      sleepSync(25);
+    }
+  }
+
+  if (lockFile === undefined) {
+    throw new Error(`Timed out waiting for fixture preparation lock: ${lockPath}`);
+  }
+
+  try {
+    fs.writeFileSync(lockFile, `${process.pid}\n`);
+    return callback();
+  } finally {
+    fs.closeSync(lockFile);
+    fs.unlinkSync(lockPath);
+  }
+};
+
 const linkFixturePackage = (fixtureRoot: string) => {
   const nodeModulesPath = path.join(fixtureRoot, "node_modules");
-  const packageLinkPath = path.join(nodeModulesPath, "bun-test-cloudflare");
+  const packageLinkPath = getFixturePackageLinkPath(fixtureRoot);
   if (fs.existsSync(packageLinkPath)) return;
 
   fs.mkdirSync(nodeModulesPath, { recursive: true });
@@ -43,44 +82,54 @@ const findFixtureTests = (fixtureRoot: string): string[] => {
 };
 
 const prepareBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions = {}) => {
-  const packageJsonPath = path.join(fixtureRoot, "package.json");
-  if (!fs.existsSync(packageJsonPath)) {
-    linkFixturePackage(fixtureRoot);
+  if (isFixturePrepared(fixtureRoot)) {
     return;
   }
 
-  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-  const dependencySpecs = Object.values({
-    ...packageJson.dependencies,
-    ...packageJson.devDependencies,
-  });
-  if (packageJson.dependencies?.["bun-test-cloudflare"] || packageJson.devDependencies?.["bun-test-cloudflare"]) {
-    throw new Error(
-      `${packageJsonPath} must not depend on bun-test-cloudflare; fixture tests should resolve the workspace package from the parent test process`,
+  return withFixturePreparationLock(fixtureRoot, () => {
+    if (isFixturePrepared(fixtureRoot)) {
+      return;
+    }
+
+    const packageJsonPath = path.join(fixtureRoot, "package.json");
+    if (!fs.existsSync(packageJsonPath)) {
+      linkFixturePackage(fixtureRoot);
+      return;
+    }
+
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    const dependencySpecs = Object.values({
+      ...packageJson.dependencies,
+      ...packageJson.devDependencies,
+    });
+    if (packageJson.dependencies?.["bun-test-cloudflare"] || packageJson.devDependencies?.["bun-test-cloudflare"]) {
+      throw new Error(
+        `${packageJsonPath} must not depend on bun-test-cloudflare; fixture tests should resolve the workspace package from the parent test process`,
+      );
+    }
+
+    const hasFileDependency = dependencySpecs.some(
+      (specifier) => typeof specifier === "string" && specifier.startsWith("file:"),
     );
-  }
+    const shouldInstallNodeModules = options.installMode === "full" || hasFileDependency;
+    const installResult = Bun.spawnSync({
+      cmd: shouldInstallNodeModules
+        ? [process.execPath, "install", "--no-save"]
+        : [process.execPath, "install", "--no-save", "--lockfile-only"],
+      cwd: fixtureRoot,
+      env: { ...process.env, ...options.env },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
 
-  const hasFileDependency = dependencySpecs.some(
-    (specifier) => typeof specifier === "string" && specifier.startsWith("file:"),
-  );
-  const shouldInstallNodeModules = options.installMode === "full" || hasFileDependency;
-  const installResult = Bun.spawnSync({
-    cmd: shouldInstallNodeModules
-      ? [process.execPath, "install", "--no-save"]
-      : [process.execPath, "install", "--no-save", "--lockfile-only"],
-    cwd: fixtureRoot,
-    env: { ...process.env, ...options.env },
-    stderr: "pipe",
-    stdout: "pipe",
+    if (installResult.exitCode !== 0) {
+      throw new Error(
+        `Failed to install fixture dependencies for ${fixtureRoot}:\n${installResult.stderr.toString() || installResult.stdout.toString()}`,
+      );
+    }
+
+    linkFixturePackage(fixtureRoot);
   });
-
-  if (installResult.exitCode !== 0) {
-    throw new Error(
-      `Failed to install fixture dependencies for ${fixtureRoot}:\n${installResult.stderr.toString() || installResult.stdout.toString()}`,
-    );
-  }
-
-  linkFixturePackage(fixtureRoot);
 };
 
 const beforeBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions = {}) => {
@@ -95,6 +144,7 @@ const beforeBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions 
 type BunFixtureResult = {
   durationMs: number;
   exitCode: number | null;
+  signalCode: string | null;
   stderr: string;
   stdout: string;
   expectStatusCode(expectedStatusCode: number): void;
@@ -109,6 +159,7 @@ const createBunFixtureResult = (
     if (result.exitCode !== expectedStatusCode) {
       console.error(`[fixture:${path.basename(fixtureRoot)}] expected exit code ${expectedStatusCode}`);
       console.error(`[fixture:${path.basename(fixtureRoot)}] actual exit code ${result.exitCode}`);
+      console.error(`[fixture:${path.basename(fixtureRoot)}] signal ${result.signalCode}`);
       if (result.stdout) console.error(result.stdout);
       if (result.stderr) console.error(result.stderr);
     }
@@ -121,8 +172,19 @@ type BunFixtureRunOptions = {
   env?: NodeJS.ProcessEnv;
   fixtureTests?: string[];
   logOutput?: boolean;
+  processTimeoutMs?: number;
   testArgs?: string[];
   timeoutMs?: number;
+};
+
+const getFixtureWranglerVersion = (fixtureRoot: string) => {
+  try {
+    const packageJsonPath = require.resolve("wrangler/package.json", { paths: [fixtureRoot] });
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    return `${packageJson.version} (${packageJsonPath})`;
+  } catch {
+    return "unresolved";
+  }
 };
 
 const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) => {
@@ -131,6 +193,7 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
     return createBunFixtureResult(fixtureRoot, {
       durationMs: performance.now() - start,
       exitCode: 1,
+      signalCode: null,
       stderr: `Fixture ${fixtureRoot} was not prepared. Call beforeBunFixture() while defining the test suite.`,
       stdout: "",
     });
@@ -141,36 +204,58 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
     return createBunFixtureResult(fixtureRoot, {
       durationMs: performance.now() - start,
       exitCode: 1,
+      signalCode: null,
       stderr: `No fixture tests found in ${fixtureRoot}`,
       stdout: "",
     });
   }
 
+  const command = [
+    process.execPath,
+    "test",
+    ...(options.testArgs ?? []),
+    "--timeout",
+    String(options.timeoutMs ?? 10_000),
+    ...fixtureTests,
+  ];
+  const shouldLogOutput = options.logOutput || process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1";
+  if (shouldLogOutput) {
+    console.error(
+      `[fixture:${path.basename(fixtureRoot)}] starting bun=${process.versions.bun} wrangler=${getFixtureWranglerVersion(fixtureRoot)}`,
+    );
+    console.error(`[fixture:${path.basename(fixtureRoot)}] command: ${command.join(" ")}`);
+  }
+
   const result = Bun.spawnSync({
-    cmd: [
-      process.execPath,
-      "test",
-      ...(options.testArgs ?? []),
-      "--timeout",
-      String(options.timeoutMs ?? 10_000),
-      ...fixtureTests,
-    ],
+    cmd: command,
     cwd: fixtureRoot,
     env: { ...process.env, ...options.env },
     stderr: "pipe",
     stdout: "pipe",
+    timeout: options.processTimeoutMs,
   });
   const durationMs = performance.now() - start;
   const stdout = result.stdout.toString();
   const stderr = result.stderr.toString();
+  const timedOut = options.processTimeoutMs !== undefined && durationMs >= options.processTimeoutMs;
+  const exitCode = timedOut ? null : result.exitCode;
+  const signalCode = timedOut ? (result.signalCode ?? "SIGTERM") : (result.signalCode ?? null);
 
-  if (options.logOutput || process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1") {
-    console.error(`[fixture:${path.basename(fixtureRoot)}] ${durationMs.toFixed(1)}ms`);
+  if (shouldLogOutput || exitCode === null) {
+    console.error(
+      `[fixture:${path.basename(fixtureRoot)}] finished in ${durationMs.toFixed(1)}ms exit=${exitCode} signal=${signalCode}`,
+    );
     if (stdout) console.error(stdout);
     if (stderr) console.error(stderr);
   }
 
-  return createBunFixtureResult(fixtureRoot, { durationMs, exitCode: result.exitCode, stderr, stdout });
+  return createBunFixtureResult(fixtureRoot, {
+    durationMs,
+    exitCode,
+    signalCode,
+    stderr,
+    stdout,
+  });
 };
 
 export const bunFixtureTest = (fixtureRoot: string, options: BunFixtureBeforeOptions = {}) => {

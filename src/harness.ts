@@ -7,6 +7,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -20,11 +21,17 @@ import {
   HarnessRun,
   type PreparedWorkerInput,
 } from "./HarnessRun";
-import { closePrewarmedServerOrchestrators, PrewarmedServerOrchestrator } from "./PrewarmedServerOrchestrator";
+import {
+  closePrewarmedServerOrchestrators,
+  PrewarmedServerOrchestrator,
+  WARM_WORKERD_POOL_SIZE,
+} from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator } from "./ServerOrchestrator";
+import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
+const DEFAULT_ISOLATED_WORKER_SLOTS = 4;
 
 export type TypeToken<T> = {
   readonly __type?: T;
@@ -50,6 +57,8 @@ export type CloudflareHarnessConfig<TWorkers extends Record<string, CloudflareWo
   events?: {
     beforeRun?: (workers: CloudflareWorkerMap<TWorkers>, server: TestHarness) => Promise<void> | void;
   };
+  isolatedWorkerSlots?: number;
+  prewarmedWorkerdPoolSize?: number;
   workers: TWorkers;
 };
 
@@ -109,7 +118,7 @@ const withDryRunBuildConfig = (config: Record<string, any>) => ({
   find_additional_modules: false,
 });
 
-const additionalModuleRuleTypes = new Set(["CommonJS", "CompiledWasm", "Data", "ESModule", "Text"]);
+const additionalModuleRuleTypes = new Set(["CommonJS", "Data", "ESModule", "Text"]);
 
 const sanitizeWorkerName = (workerName: string) => workerName.replace(/[^a-zA-Z0-9._-]/g, "-");
 
@@ -152,7 +161,7 @@ const buildInitializationTimeoutMs = getPositiveIntegerEnvironmentVariable(
 );
 const buildOperationTimeoutMs = getPositiveIntegerEnvironmentVariable(
   "BUN_TEST_CLOUDFLARE_BUILD_OPERATION_TIMEOUT_MS",
-  10_000,
+  30_000,
 );
 const buildRetryCount = getNonNegativeIntegerEnvironmentVariable("BUN_TEST_CLOUDFLARE_BUILD_RETRY_COUNT", 1);
 const buildRetryDelayMs = getPositiveIntegerEnvironmentVariable("BUN_TEST_CLOUDFLARE_BUILD_RETRY_DELAY_MS", 250);
@@ -330,11 +339,11 @@ const runWranglerDryRun = (configPath: string, outdir: string, env: string | und
     const stdout = result.stdout.toString();
     const stderr = result.stderr.toString();
 
-    if (result.exitCode === 0) {
+    const timedOut = result.signalCode === "SIGTERM";
+    if (!timedOut && result.exitCode === 0) {
       return;
     }
 
-    const timedOut = result.signalCode === "SIGTERM";
     if (timedOut && attempt < buildRetryCount && getRemainingBuildTimeMs(deadline) > 0) {
       sleepSync(Math.min(buildRetryDelayMs, getRemainingBuildTimeMs(deadline)));
       continue;
@@ -374,12 +383,38 @@ const createWorkerBuildPlan = (
   workerName,
 });
 
+const isProjectBoundary = (directory: string) => {
+  if (existsSync(path.join(directory, ".git"))) return true;
+  try {
+    const packageJson = JSON.parse(readFileSync(path.join(directory, "package.json"), "utf8")) as {
+      workspaces?: unknown;
+    };
+    return packageJson.workspaces !== undefined;
+  } catch {
+    return false;
+  }
+};
+
+const findProjectBoundary = (directory: string) => {
+  let currentDirectory = path.resolve(directory);
+  while (true) {
+    if (isProjectBoundary(currentDirectory)) return currentDirectory;
+    const parentDirectory = path.dirname(currentDirectory);
+    if (parentDirectory === currentDirectory) return undefined;
+    currentDirectory = parentDirectory;
+  }
+};
+
 const getAncestorDirectories = (directory: string) => {
   const directories: string[] = [];
   let currentDirectory = path.resolve(directory);
+  const projectBoundary = findProjectBoundary(currentDirectory);
 
   while (!directories.includes(currentDirectory)) {
     directories.push(currentDirectory);
+    if (projectBoundary === undefined || currentDirectory === projectBoundary) {
+      break;
+    }
     const parentDirectory = path.dirname(currentDirectory);
     if (parentDirectory === currentDirectory) {
       break;
@@ -453,6 +488,8 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
       }
     }
 
+    rmSync(plan.outdir, { force: true, recursive: true });
+    mkdirSync(plan.outdir, { recursive: true });
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
       const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
@@ -628,29 +665,57 @@ const prepareWorkerInput = (
 export const createCloudflareHarness = <const TWorkers extends Record<string, CloudflareWorkerConfig>>(
   config: CloudflareHarnessConfig<TWorkers>,
 ): CloudflareHarness<TWorkers> => {
-  const { events, workers: workerConfigs, ...serverConfig } = config;
+  const {
+    events,
+    isolatedWorkerSlots: configuredIsolatedWorkerSlots,
+    prewarmedWorkerdPoolSize = WARM_WORKERD_POOL_SIZE,
+    workers: workerConfigs,
+    ...serverConfig
+  } = config;
+  if (
+    configuredIsolatedWorkerSlots !== undefined &&
+    (!Number.isInteger(configuredIsolatedWorkerSlots) || configuredIsolatedWorkerSlots < 1)
+  ) {
+    throw new TypeError("isolatedWorkerSlots must be a positive integer");
+  }
+  if (!Number.isInteger(prewarmedWorkerdPoolSize) || prewarmedWorkerdPoolSize < 1) {
+    throw new TypeError("prewarmedWorkerdPoolSize must be a positive integer");
+  }
   const workerEntries = Object.entries(workerConfigs) as Array<[keyof TWorkers, CloudflareWorkerConfig]>;
   const preparedWorkers = workerEntries.map(([key, worker]) =>
     prepareWorkerInput(String(key), worker, serverConfig.root),
   );
+  const supportsIsolatedWorkerSlots =
+    configuredIsolatedWorkerSlots === 1 ? false : canUseIsolatedWorkerSlots(preparedWorkers);
+  const isolatedWorkerSlots =
+    configuredIsolatedWorkerSlots ?? (supportsIsolatedWorkerSlots ? DEFAULT_ISOLATED_WORKER_SLOTS : 1);
+
+  if (isolatedWorkerSlots > 1 && !supportsIsolatedWorkerSlots) {
+    throw new TypeError("isolatedWorkerSlots does not support one or more configured Worker bindings");
+  }
+
+  const workerSlots =
+    isolatedWorkerSlots > 1 ? createIsolatedWorkerSlots(preparedWorkers, isolatedWorkerSlots) : undefined;
 
   const testHarnessOptions = {
     ...serverConfig,
-    workers: preparedWorkers.map((worker) => worker.input),
+    workers: workerSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
   };
   const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
+      cacheBridgeSecret: workerSlots?.secret,
       events,
       hasBrowserRendering,
       preparedWorkers,
       testHarnessOptions,
       workerEntries,
+      workerSlotNames: workerSlots?.workerNames,
     });
   const orchestrator =
     process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
       ? new InlineServerOrchestrator(createRun)
-      : new PrewarmedServerOrchestrator(createRun);
+      : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize);
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
 
   return {

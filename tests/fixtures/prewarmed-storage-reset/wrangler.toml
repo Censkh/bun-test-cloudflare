@@ -1,6 +1,6 @@
 name = "prewarmed-storage-reset"
 main = "src/worker.ts"
-compatibility_date = "2026-08-15"
+compatibility_date = "2025-08-15"
 
 [[d1_databases]]
 binding = "DB"

@@ -2,7 +2,7 @@ import type { HarnessRun } from "./HarnessRun";
 import { stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
 
-export const WARM_WORKERD_POOL_SIZE = 2;
+export const WARM_WORKERD_POOL_SIZE = 1;
 const DEFAULT_WARM_WORKERD_START_TIMEOUT_MS = 30_000;
 
 type PrewarmedServerOrchestratorRegistry = {
@@ -12,9 +12,11 @@ type PrewarmedServerOrchestratorRegistry = {
 };
 
 type WarmHarnessRun<TWorkers extends Record<string, any>> = {
-  needsReset?: boolean;
+  phase: "reset" | "startup";
+  preferForNextLease: boolean;
   run: HarnessRun<TWorkers>;
   started: Promise<HarnessRun<TWorkers>>;
+  status: "failed" | "pending" | "ready";
 };
 
 declare global {
@@ -69,6 +71,13 @@ const waitForWarmStart = async <TWorkers extends Record<string, any>>(warmRun: W
   }
 };
 
+const logDiscardedWarmRun = (phase: string, error: unknown) => {
+  if (process.env.BUN_TEST_CLOUDFLARE_TIMINGS !== "1") return;
+
+  console.error(`[bun-test-cloudflare] discarded prewarmed server during ${phase}`);
+  console.error(error);
+};
+
 export const closePrewarmedServerOrchestrators = async () => {
   const registry = globalThis.__bunTestCloudflarePrewarmedServerOrchestrators;
   if (!registry || registry.closing) {
@@ -89,7 +98,10 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   readonly #inUse = new Set<HarnessRun<TWorkers>>();
   #closed = false;
 
-  constructor(private readonly createRun: () => HarnessRun<TWorkers>) {
+  constructor(
+    private readonly createRun: () => HarnessRun<TWorkers>,
+    private readonly poolSize = WARM_WORKERD_POOL_SIZE,
+  ) {
     getPrewarmedServerOrchestratorRegistry().orchestrators.add(this);
     this.#fillWarmPool();
   }
@@ -100,34 +112,33 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     let run: HarnessRun<TWorkers>;
     let discardedRuns = 0;
     while (true) {
-      const warmRun = this.#available.shift() ?? this.#createStartedRun();
+      const warmRun = this.#takeAvailableRun() ?? this.#createStartedRun();
 
       try {
         run = await waitForWarmStart(warmRun);
       } catch (error) {
-        await warmRun.run.close();
+        logDiscardedWarmRun(warmRun.phase, error);
+        await warmRun.run.close().catch(() => {});
         discardedRuns += 1;
-        if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
+        if (discardedRuns > this.poolSize) {
           throw error;
         }
         continue;
       }
 
       if (this.#closed) {
-        await run.close();
+        await run.close().catch(() => {});
         throw new Error("Cloudflare server orchestrator is closed");
       }
 
       try {
-        if (warmRun.needsReset) {
-          await run.resetForReuse();
-        }
         await run.assertUsable();
         break;
       } catch (error) {
-        await run.close();
+        logDiscardedWarmRun("reset", error);
+        await run.close().catch(() => {});
         discardedRuns += 1;
-        if (discardedRuns > WARM_WORKERD_POOL_SIZE) {
+        if (discardedRuns > this.poolSize) {
           throw error;
         }
       }
@@ -149,8 +160,8 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
           this.#fillWarmPool();
           throw error;
         }
-        if (!this.#closed && this.#available.length + this.#inUse.size < WARM_WORKERD_POOL_SIZE) {
-          this.#available.push({ needsReset: true, run, started: Promise.resolve(run) });
+        if (!this.#closed && this.#available.length + this.#inUse.size < this.poolSize) {
+          this.#available.push(this.#createResetRun(run));
         } else {
           await run.close();
         }
@@ -180,29 +191,68 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
   #createStartedRun(): WarmHarnessRun<TWorkers> {
     const run = this.createRun();
-    const started = run.start().then(
+    return this.#createPreparingRun(run, "startup", false, () => run.start());
+  }
+
+  #createResetRun(run: HarnessRun<TWorkers>): WarmHarnessRun<TWorkers> {
+    return this.#createPreparingRun(run, "reset", run.canRotateWorkerSlotForReuse?.() ?? false, () =>
+      run.resetForReuse(),
+    );
+  }
+
+  #createPreparingRun(
+    run: HarnessRun<TWorkers>,
+    phase: WarmHarnessRun<TWorkers>["phase"],
+    preferForNextLease: boolean,
+    prepare: () => Promise<unknown>,
+  ): WarmHarnessRun<TWorkers> {
+    const warmRun: WarmHarnessRun<TWorkers> = {
+      phase,
+      preferForNextLease,
+      run,
+      started: undefined as unknown as Promise<HarnessRun<TWorkers>>,
+      status: "pending",
+    };
+    warmRun.started = prepare().then(
       () => run,
       async (error) => {
-        await run.close();
+        warmRun.status = "failed";
+        await run.close().catch(() => {});
         throw error;
       },
     );
-    started.catch(() => {});
-    return { run, started };
+    warmRun.started.then(
+      () => {
+        warmRun.status = "ready";
+      },
+      () => {},
+    );
+    return warmRun;
   }
 
-  async #closeWarmRun({ run, started }: WarmHarnessRun<TWorkers>) {
+  #takeAvailableRun() {
+    const reusableIndex = this.#available.findLastIndex((warmRun) => warmRun.preferForNextLease);
+    const readyIndex =
+      reusableIndex >= 0 ? reusableIndex : this.#available.findIndex((warmRun) => warmRun.status === "ready");
+    const settledIndex =
+      readyIndex >= 0 ? readyIndex : this.#available.findIndex((warmRun) => warmRun.status === "failed");
+    const index = settledIndex >= 0 ? settledIndex : 0;
+    return this.#available.splice(index, 1)[0];
+  }
+
+  async #closeWarmRun(warmRun: WarmHarnessRun<TWorkers>) {
+    const { run } = warmRun;
     // Closing a Wrangler harness while server.listen() is still starting can
     // leave workerd children behind. Wait for startup to settle when possible,
     // but never let a stuck background prewarm block test teardown forever.
-    await waitForWarmStart({ run, started }).catch(() => {});
+    await waitForWarmStart(warmRun).catch(() => {});
     await run.close();
   }
 
   #fillWarmPool() {
     if (this.#closed) return;
 
-    while (this.#available.length + this.#inUse.size < WARM_WORKERD_POOL_SIZE) {
+    while (this.#available.length + this.#inUse.size < this.poolSize) {
       this.#available.push(this.#createStartedRun());
     }
   }
@@ -251,7 +301,7 @@ export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> im
     } catch (error) {
       const run = this.#run;
       this.#run = undefined;
-      await run?.close();
+      await run?.close().catch(() => {});
       await release();
       throw error;
     }

@@ -1,0 +1,66 @@
+name = "binding-types-fixture"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"
+
+[vars]
+TEXT_VALUE = "fixture-value"
+JSON_VALUE = { enabled = true }
+
+[assets]
+binding = "ASSETS"
+directory = "public"
+run_worker_first = true
+
+[version_metadata]
+binding = "VERSION"
+
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "binding-types"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "binding-types"
+database_id = "binding-types"
+
+[[durable_objects.bindings]]
+name = "COUNTER"
+class_name = "Counter"
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "00000000000000000000000000000000"
+localConnectionString = "postgres://user:password@127.0.0.1:5432/database"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "binding-types"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Counter"]
+
+[[queues.producers]]
+binding = "QUEUE"
+queue = "binding-types"
+
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "binding-types"
+
+[[ratelimits]]
+name = "RATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+[[send_email]]
+name = "EMAIL"
+
+[[services]]
+binding = "SERVICE"
+service = "binding-types-service"
+
+[[workflows]]
+binding = "WORKFLOW"
+name = "binding-types-workflow"
+class_name = "FixtureWorkflow"

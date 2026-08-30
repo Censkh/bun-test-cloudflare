@@ -10,6 +10,7 @@ export const compatibilityPatchNames = [
   "global-caches-named",
   "child-process-extra-fd",
   "workerd-child-process",
+  "workerd-child-process-stdio-errors",
   "workerd-child-process-unref",
   "workerd-child-process-stdio-unref",
   "browser-rendering",

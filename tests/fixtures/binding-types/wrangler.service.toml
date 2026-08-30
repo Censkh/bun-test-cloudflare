@@ -1,0 +1,3 @@
+name = "binding-types-service"
+main = "src/service.ts"
+compatibility_date = "2025-08-15"

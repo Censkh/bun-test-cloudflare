@@ -21,6 +21,8 @@ type FakeServer = {
   getWorker: (name?: string) => FakeWorker;
   listen: () => Promise<{ url: URL }>;
   logs: unknown[];
+  reset: () => Promise<void>;
+  resetCalls: number;
   update: () => Promise<void>;
   updateCalls: number;
   workerEnvs: Record<string, unknown>;
@@ -32,9 +34,48 @@ let lastOptions: unknown;
 const spawnedCommands: string[][] = [];
 const spawnedTimeouts: Array<number | undefined> = [];
 let timedOutWranglerBuildsRemaining = 0;
+let timedOutWranglerExitCode: null | 0 = null;
 const testRoot = await mkdtemp(path.join(os.tmpdir(), "bun-test-cloudflare-harness-"));
 const originalSpawn = Bun.spawn;
 const originalSpawnSync = Bun.spawnSync;
+
+const convertMockBindings = (config: Record<string, any>) => {
+  if (config.__slotEligible) {
+    return { SLOT_ELIGIBLE: { type: "plain_text", value: "true" } };
+  }
+  if (config.d1_databases || config.durable_objects || config.images || config.kv_namespaces || config.r2_buckets) {
+    return {
+      ...(config.d1_databases?.[0] ? { DB: { database_id: config.d1_databases[0].database_id, type: "d1" } } : {}),
+      ...(config.durable_objects?.bindings?.[0]
+        ? {
+            COUNTER: {
+              class_name: config.durable_objects.bindings[0].class_name,
+              type: "durable_object_namespace",
+            },
+          }
+        : {}),
+      ...(config.images ? { IMAGES: { type: "images" } } : {}),
+      ...(config.kv_namespaces?.[0] ? { KV: { id: config.kv_namespaces[0].id, type: "kv_namespace" } } : {}),
+      ...(config.r2_buckets?.[0]
+        ? { BUCKET: { bucket_name: config.r2_buckets[0].bucket_name, type: "r2_bucket" } }
+        : {}),
+      ...(config.vars
+        ? Object.fromEntries(
+            Object.entries(config.vars).map(([name, value]) => [
+              name,
+              typeof value === "string" ? { type: "plain_text", value } : { type: "json", value },
+            ]),
+          )
+        : {}),
+    };
+  }
+  if (config.services?.[0]) {
+    return {
+      EXTERNAL: { service: config.services[0].service, type: "service" },
+    };
+  }
+  return { UNSUPPORTED: { type: "browser" } };
+};
 
 const wranglerMock = {
   createTestHarness: (options: unknown) => {
@@ -44,6 +85,7 @@ const wranglerMock = {
     return server;
   },
   unstable_readConfig: ({ config }: { config: string }) => ({
+    __slotEligible: config.includes("eligible"),
     compatibility_date: "2025-08-15",
     define: {
       "process.env.NODE_ENV": "'production'",
@@ -53,6 +95,7 @@ const wranglerMock = {
     rules: [],
     triggers: {},
   }),
+  unstable_convertConfigBindingsToStartWorkerBindings: convertMockBindings,
 };
 
 const createFakeServer = (): FakeServer => ({
@@ -90,6 +133,10 @@ const createFakeServer = (): FakeServer => ({
     return { url: new URL("http://127.0.0.1:8787") };
   },
   logs: [],
+  async reset() {
+    this.resetCalls += 1;
+  },
+  resetCalls: 0,
   async update() {
     this.updateCalls += 1;
   },
@@ -114,7 +161,7 @@ Bun.spawnSync = ((options: { cmd: string[]; timeout?: number }) => {
   if (options.cmd.includes("deploy") && options.cmd.includes("--dry-run") && timedOutWranglerBuildsRemaining > 0) {
     timedOutWranglerBuildsRemaining -= 1;
     return {
-      exitCode: null,
+      exitCode: timedOutWranglerExitCode,
       signalCode: "SIGTERM",
       stderr: Buffer.from(""),
       stdout: Buffer.from(""),
@@ -292,20 +339,54 @@ test("retries a timed-out Wrangler dry-run build", async () => {
   const retryCommands = spawnedCommands.slice(commandStart);
   expect(retryCommands).toHaveLength(2);
   expect(retryCommands.every((command) => command.includes("--dry-run"))).toBe(true);
-  expect(spawnedTimeouts.slice(timeoutStart)).toEqual([10_000, 10_000]);
+  expect(
+    spawnedTimeouts
+      .slice(timeoutStart)
+      .every((timeout) => timeout !== undefined && timeout >= 29_000 && timeout <= 30_000),
+  ).toBe(true);
+});
+
+test("retries when Bun reports a timed-out Wrangler build with exit code zero", async () => {
+  const commandStart = spawnedCommands.length;
+  timedOutWranglerBuildsRemaining = 1;
+  timedOutWranglerExitCode = 0;
+
+  const harness = createCloudflareHarness({
+    root: testRoot,
+    workers: {
+      BACKEND: {
+        config: {
+          compatibility_date: "2025-08-15",
+          main: "src/backend.ts",
+          name: "zero-exit-timeout-backend",
+        },
+      },
+    },
+  });
+
+  await harness.run(() => {});
+
+  expect(spawnedCommands.slice(commandStart)).toHaveLength(2);
+  timedOutWranglerExitCode = null;
 });
 
 test("copies explicit additional modules without recursively copying harness build output", async () => {
   const moduleRoot = path.join(testRoot, "copy-additional-modules");
   const sourceModulePath = path.join(moduleRoot, "node_modules/payload/dist/uploads/isImage.js");
+  const outsideModulePath = path.join(testRoot, "outside.wasm");
+  const staleOutdirModulePath = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms/stale.wasm");
   const staleHarnessModulePath = path.join(
     moduleRoot,
     "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js",
   );
   mkdirSync(path.dirname(sourceModulePath), { recursive: true });
   mkdirSync(path.dirname(staleHarnessModulePath), { recursive: true });
+  mkdirSync(path.dirname(staleOutdirModulePath), { recursive: true });
+  writeFileSync(path.join(moduleRoot, "package.json"), JSON.stringify({ private: true, workspaces: [] }));
   writeFileSync(sourceModulePath, "export const isImage = () => true;\n");
+  writeFileSync(outsideModulePath, "outside");
   writeFileSync(staleHarnessModulePath, "export const stale = true;\n");
+  writeFileSync(staleOutdirModulePath, "stale");
 
   const harness = createCloudflareHarness({
     root: moduleRoot,
@@ -316,7 +397,10 @@ test("copies explicit additional modules without recursively copying harness bui
           find_additional_modules: true,
           main: "src/cms.ts",
           name: "copy-modules-cms",
-          rules: [{ type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] }],
+          rules: [
+            { type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] },
+            { type: "CompiledWasm", globs: ["**/*.wasm"] },
+          ],
         },
         name: "copy-modules-cms",
       },
@@ -326,7 +410,9 @@ test("copies explicit additional modules without recursively copying harness bui
   await harness.run(() => {});
 
   const outdir = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms");
+  expect(existsSync(staleOutdirModulePath)).toBe(false);
   expect(existsSync(path.join(outdir, "node_modules/payload/dist/uploads/isImage.js"))).toBe(true);
+  expect(existsSync(path.join(outdir, "outside.wasm"))).toBe(false);
   expect(
     existsSync(
       path.join(outdir, "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js"),
@@ -344,6 +430,7 @@ test("copies explicit additional modules without recursively copying harness bui
           no_bundle: true,
           rules: [
             { type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] },
+            { type: "CompiledWasm", globs: ["**/*.wasm"] },
             { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
           ],
         }),
@@ -352,7 +439,7 @@ test("copies explicit additional modules without recursively copying harness bui
   });
 });
 
-test("run starts the server, passes typed workers, and reloads it before reuse", async () => {
+test("run starts the server, passes typed workers, and resets it before reuse", async () => {
   const harness = createCloudflareHarness({
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
@@ -370,6 +457,7 @@ test("run starts the server, passes typed workers, and reloads it before reuse",
 
   expect(result).toBe("ok");
   expect(server.listenCalls).toBe(1);
+  expect(server.resetCalls).toBe(0);
   expect(server.updateCalls).toBe(0);
   expect(server.closeCalls).toBe(0);
 
@@ -378,7 +466,8 @@ test("run starts the server, passes typed workers, and reloads it before reuse",
     expect(currentServer as unknown).toBe(server as unknown);
   });
 
-  expect(server.updateCalls).toBe(1);
+  expect(server.resetCalls).toBe(2);
+  expect(server.updateCalls).toBe(0);
   expect(server.closeCalls).toBe(0);
 });
 
@@ -435,6 +524,7 @@ test("run executes events.beforeRun inside the async run context", async () => {
 
 test("parallel run calls use independent servers", async () => {
   const harness = createCloudflareHarness({
+    prewarmedWorkerdPoolSize: 2,
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
     },
@@ -507,6 +597,35 @@ test("prewarms the configured server pool and refills it after a lease is releas
 
   await closePrewarmedServerOrchestrators();
   expect(harnessServers.every((server) => server.closeCalls === 1)).toBe(true);
+});
+
+test("supports a configured prewarmed workerd pool size", async () => {
+  const serversBefore = createdServers.length;
+  const harness = createCloudflareHarness({
+    prewarmedWorkerdPoolSize: 2,
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
+    },
+  });
+
+  expect(createdServers.slice(serversBefore)).toHaveLength(2);
+  await harness.run(() => {});
+  expect(createdServers.slice(serversBefore)).toHaveLength(2);
+});
+
+test("uses four isolated slots and one prewarmed workerd by default when eligible", () => {
+  const serversBefore = createdServers.length;
+  createCloudflareHarness({
+    workers: {
+      BACKEND: {
+        configPath: "./wrangler.eligible.toml",
+        name: "backend-worker",
+      },
+    },
+  });
+
+  expect(createdServers.slice(serversBefore)).toHaveLength(1);
+  expect((lastOptions as { workers: unknown[] }).workers).toHaveLength(4);
 });
 
 test("discards stale prewarmed servers before leasing them", async () => {

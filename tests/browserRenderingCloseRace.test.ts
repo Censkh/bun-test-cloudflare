@@ -4,6 +4,12 @@ import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 const fixtureRoot = fixturePath(import.meta.dir, "browser-rendering-close-race");
 const fixtureTimeoutMs = 30_000;
 const testTimeoutMs = 45_000;
+const concurrentFixtureTests = [
+  "./browserRenderingCloseRaceA.fixture.ts",
+  "./browserRenderingCloseRaceB.fixture.ts",
+  "./browserRenderingCloseRaceC.fixture.ts",
+  "./browserRenderingCloseRaceD.fixture.ts",
+];
 
 const fixture = bunFixtureTest(fixtureRoot, { installMode: "full" });
 
@@ -37,6 +43,7 @@ describe("Browser Rendering close race", () => {
         env: {
           BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM: "1",
         },
+        fixtureTests: concurrentFixtureTests,
         testArgs: ["--parallel=4", "--parallel-delay=0"],
         timeoutMs: fixtureTimeoutMs,
       });
