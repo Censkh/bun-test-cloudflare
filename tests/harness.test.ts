@@ -339,7 +339,11 @@ test("retries a timed-out Wrangler dry-run build", async () => {
   const retryCommands = spawnedCommands.slice(commandStart);
   expect(retryCommands).toHaveLength(2);
   expect(retryCommands.every((command) => command.includes("--dry-run"))).toBe(true);
-  expect(spawnedTimeouts.slice(timeoutStart)).toEqual([10_000, 10_000]);
+  expect(
+    spawnedTimeouts
+      .slice(timeoutStart)
+      .every((timeout) => timeout !== undefined && timeout >= 29_000 && timeout <= 30_000),
+  ).toBe(true);
 });
 
 test("retries when Bun reports a timed-out Wrangler build with exit code zero", async () => {
@@ -369,14 +373,20 @@ test("retries when Bun reports a timed-out Wrangler build with exit code zero", 
 test("copies explicit additional modules without recursively copying harness build output", async () => {
   const moduleRoot = path.join(testRoot, "copy-additional-modules");
   const sourceModulePath = path.join(moduleRoot, "node_modules/payload/dist/uploads/isImage.js");
+  const outsideModulePath = path.join(testRoot, "outside.wasm");
+  const staleOutdirModulePath = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms/stale.wasm");
   const staleHarnessModulePath = path.join(
     moduleRoot,
     "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js",
   );
   mkdirSync(path.dirname(sourceModulePath), { recursive: true });
   mkdirSync(path.dirname(staleHarnessModulePath), { recursive: true });
+  mkdirSync(path.dirname(staleOutdirModulePath), { recursive: true });
+  writeFileSync(path.join(moduleRoot, "package.json"), JSON.stringify({ private: true, workspaces: [] }));
   writeFileSync(sourceModulePath, "export const isImage = () => true;\n");
+  writeFileSync(outsideModulePath, "outside");
   writeFileSync(staleHarnessModulePath, "export const stale = true;\n");
+  writeFileSync(staleOutdirModulePath, "stale");
 
   const harness = createCloudflareHarness({
     root: moduleRoot,
@@ -387,7 +397,10 @@ test("copies explicit additional modules without recursively copying harness bui
           find_additional_modules: true,
           main: "src/cms.ts",
           name: "copy-modules-cms",
-          rules: [{ type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] }],
+          rules: [
+            { type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] },
+            { type: "CompiledWasm", globs: ["**/*.wasm"] },
+          ],
         },
         name: "copy-modules-cms",
       },
@@ -397,7 +410,9 @@ test("copies explicit additional modules without recursively copying harness bui
   await harness.run(() => {});
 
   const outdir = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms");
+  expect(existsSync(staleOutdirModulePath)).toBe(false);
   expect(existsSync(path.join(outdir, "node_modules/payload/dist/uploads/isImage.js"))).toBe(true);
+  expect(existsSync(path.join(outdir, "outside.wasm"))).toBe(false);
   expect(
     existsSync(
       path.join(outdir, "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js"),
@@ -415,6 +430,7 @@ test("copies explicit additional modules without recursively copying harness bui
           no_bundle: true,
           rules: [
             { type: "ESModule", globs: ["node_modules/payload/dist/uploads/*.js"] },
+            { type: "CompiledWasm", globs: ["**/*.wasm"] },
             { type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
           ],
         }),

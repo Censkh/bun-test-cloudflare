@@ -7,6 +7,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -117,7 +118,7 @@ const withDryRunBuildConfig = (config: Record<string, any>) => ({
   find_additional_modules: false,
 });
 
-const additionalModuleRuleTypes = new Set(["CommonJS", "CompiledWasm", "Data", "ESModule", "Text"]);
+const additionalModuleRuleTypes = new Set(["CommonJS", "Data", "ESModule", "Text"]);
 
 const sanitizeWorkerName = (workerName: string) => workerName.replace(/[^a-zA-Z0-9._-]/g, "-");
 
@@ -160,7 +161,7 @@ const buildInitializationTimeoutMs = getPositiveIntegerEnvironmentVariable(
 );
 const buildOperationTimeoutMs = getPositiveIntegerEnvironmentVariable(
   "BUN_TEST_CLOUDFLARE_BUILD_OPERATION_TIMEOUT_MS",
-  10_000,
+  30_000,
 );
 const buildRetryCount = getNonNegativeIntegerEnvironmentVariable("BUN_TEST_CLOUDFLARE_BUILD_RETRY_COUNT", 1);
 const buildRetryDelayMs = getPositiveIntegerEnvironmentVariable("BUN_TEST_CLOUDFLARE_BUILD_RETRY_DELAY_MS", 250);
@@ -382,12 +383,38 @@ const createWorkerBuildPlan = (
   workerName,
 });
 
+const isProjectBoundary = (directory: string) => {
+  if (existsSync(path.join(directory, ".git"))) return true;
+  try {
+    const packageJson = JSON.parse(readFileSync(path.join(directory, "package.json"), "utf8")) as {
+      workspaces?: unknown;
+    };
+    return packageJson.workspaces !== undefined;
+  } catch {
+    return false;
+  }
+};
+
+const findProjectBoundary = (directory: string) => {
+  let currentDirectory = path.resolve(directory);
+  while (true) {
+    if (isProjectBoundary(currentDirectory)) return currentDirectory;
+    const parentDirectory = path.dirname(currentDirectory);
+    if (parentDirectory === currentDirectory) return undefined;
+    currentDirectory = parentDirectory;
+  }
+};
+
 const getAncestorDirectories = (directory: string) => {
   const directories: string[] = [];
   let currentDirectory = path.resolve(directory);
+  const projectBoundary = findProjectBoundary(currentDirectory);
 
   while (!directories.includes(currentDirectory)) {
     directories.push(currentDirectory);
+    if (projectBoundary === undefined || currentDirectory === projectBoundary) {
+      break;
+    }
     const parentDirectory = path.dirname(currentDirectory);
     if (parentDirectory === currentDirectory) {
       break;
@@ -461,6 +488,8 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
       }
     }
 
+    rmSync(plan.outdir, { force: true, recursive: true });
+    mkdirSync(plan.outdir, { recursive: true });
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
       const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
