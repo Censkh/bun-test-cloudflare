@@ -231,7 +231,13 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   }
 
   #takeAvailableRun() {
-    const reusableIndex = this.#available.findLastIndex((warmRun) => warmRun.preferForNextLease);
+    let reusableIndex = -1;
+    for (let index = this.#available.length - 1; index >= 0; index -= 1) {
+      if (this.#available[index]?.preferForNextLease) {
+        reusableIndex = index;
+        break;
+      }
+    }
     const readyIndex =
       reusableIndex >= 0 ? reusableIndex : this.#available.findIndex((warmRun) => warmRun.status === "ready");
     const settledIndex =

@@ -4,7 +4,7 @@
   "type": "module",
   "devDependencies": {
     "api-def": "0.15.0",
-    "typescript": "7.0.1-rc",
+    "typescript": "7.0.2",
     "wrangler": "4.105.0"
   }
 }

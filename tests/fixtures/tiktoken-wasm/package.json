@@ -4,7 +4,7 @@
   "type": "module",
   "devDependencies": {
     "tiktoken": "^1.0.22",
-    "typescript": "7.0.1-rc",
+    "typescript": "7.0.2",
     "wrangler": "4.105.0"
   }
 }
