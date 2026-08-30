@@ -21,10 +21,7 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
   ).toBeTrue();
 });
 
-test("isolated Worker slots accept compiled WASM and reject unsupported storage bindings", () => {
-  expect(
-    canUseIsolatedWorkerSlots([workerInput({ rules: [{ globs: ["**/*.wasm"], type: "CompiledWasm" }] })]),
-  ).toBeTrue();
+test("isolated Worker slots reject unsupported and unidentified storage bindings", () => {
   expect(
     canUseIsolatedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
   ).toBeFalse();
@@ -122,7 +119,7 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
           main,
           name: "worker",
           r2_buckets: [{ binding: "BUCKET", bucket_name: "bucket" }],
-          rules: [],
+          rules: [{ globs: ["**/*.wasm"], type: "CompiledWasm" }],
         }),
       ],
       2,
@@ -141,6 +138,7 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
       globs: ["worker.js", path.basename(firstConfig.main).replace(".cache-bridge.js", ".cache-namespace.js")],
       type: "ESModule",
     });
+    expect(firstConfig.rules[1]).toEqual({ globs: ["**/*.wasm"], type: "CompiledWasm" });
   } finally {
     fs.rmSync(root, { force: true, recursive: true });
   }
