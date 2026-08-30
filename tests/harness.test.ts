@@ -32,6 +32,7 @@ const createdServers: FakeServer[] = [];
 const lifecycleEvents: string[] = [];
 let lastOptions: unknown;
 const spawnedCommands: string[][] = [];
+const spawnedWorkingDirectories: Array<string | undefined> = [];
 const spawnedTimeouts: Array<number | undefined> = [];
 let timedOutWranglerBuildsRemaining = 0;
 let timedOutWranglerExitCode: null | 0 = null;
@@ -155,8 +156,9 @@ const runFakeWranglerBuild = (command: string[]) => {
   writeFileSync(path.join(outdir, builtFile), "export default {};");
 };
 
-Bun.spawnSync = ((options: { cmd: string[]; timeout?: number }) => {
+Bun.spawnSync = ((options: { cmd: string[]; cwd?: string; timeout?: number }) => {
   spawnedCommands.push(options.cmd);
+  spawnedWorkingDirectories.push(options.cwd);
   spawnedTimeouts.push(options.timeout);
   if (options.cmd.includes("deploy") && options.cmd.includes("--dry-run") && timedOutWranglerBuildsRemaining > 0) {
     timedOutWranglerBuildsRemaining -= 1;
@@ -314,6 +316,24 @@ test("prebuilds inline worker configs with the same test transform", async () =>
   expect(spawnedCommands.at(-1)).toContain(
     path.join(testRoot, "node_modules/.btcf/worker-build/inline-backend/wrangler.json"),
   );
+  expect(spawnedWorkingDirectories.at(-1)).toBe(testRoot);
+});
+
+test("runs custom builds from the original config directory", async () => {
+  const configDirectory = path.join(testRoot, "nested-worker");
+  const harness = createCloudflareHarness({
+    root: testRoot,
+    workers: {
+      CMS: {
+        configPath: path.join(configDirectory, "wrangler.cms.toml"),
+        name: "nested-cms-worker",
+      },
+    },
+  });
+
+  await harness.run(() => {});
+
+  expect(spawnedWorkingDirectories.at(-1)).toBe(configDirectory);
 });
 
 test("retries a timed-out Wrangler dry-run build", async () => {

@@ -220,6 +220,7 @@ type WorkerBuildResult = {
 
 type WorkerBuildPlan = {
   additionalModuleSourceRoots: string[];
+  buildCwd: string;
   buildKey: string;
   config: Record<string, any>;
   env: string | undefined;
@@ -236,8 +237,8 @@ const getBunTestRunKey = () =>
 
 const getBuildStatusPath = (outdir: string) => `${outdir}.build-${getBunTestRunKey()}.json`;
 
-const createBuildKey = (config: Record<string, any>, env: string | undefined) =>
-  crypto.createHash("sha256").update(JSON.stringify({ config, env })).digest("hex");
+const createBuildKey = (config: Record<string, any>, env: string | undefined, buildCwd: string) =>
+  crypto.createHash("sha256").update(JSON.stringify({ buildCwd, config, env })).digest("hex");
 
 const writeBuildStatus = (statusPath: string, status: WorkerBuildStatus) => {
   writeFileSync(statusPath, JSON.stringify(status));
@@ -316,7 +317,13 @@ const withBuildLock = <TResult>(outdir: string, deadline: number, callback: () =
   }
 };
 
-const runWranglerDryRun = (configPath: string, outdir: string, env: string | undefined, deadline: number) => {
+const runWranglerDryRun = (
+  configPath: string,
+  outdir: string,
+  env: string | undefined,
+  deadline: number,
+  cwd: string,
+) => {
   mkdirSync(outdir, { recursive: true });
   const wranglerBinPath = getWranglerBinPath();
   const args = [wranglerBinPath, "deploy", "--dry-run", "--outdir", outdir, "--config", configPath];
@@ -332,6 +339,7 @@ const runWranglerDryRun = (configPath: string, outdir: string, env: string | und
 
     const result = Bun.spawnSync({
       cmd: [process.execPath, ...getWranglerPreloadArgs(), ...args],
+      cwd,
       stderr: "pipe",
       stdout: "pipe",
       timeout,
@@ -368,13 +376,15 @@ const runWranglerDryRun = (configPath: string, outdir: string, env: string | und
 const createWorkerBuildPlan = (
   workerName: string,
   outdir: string,
+  buildCwd: string,
   testConfig: Record<string, any>,
   config: Record<string, any>,
   env: string | undefined,
   additionalModuleSourceRoots: string[],
 ): WorkerBuildPlan => ({
   additionalModuleSourceRoots,
-  buildKey: createBuildKey(testConfig, env),
+  buildCwd,
+  buildKey: createBuildKey(testConfig, env, buildCwd),
   config,
   env,
   outdir,
@@ -508,7 +518,7 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
       const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
-      runWranglerDryRun(testConfigPath, plan.outdir, plan.env, deadline);
+      runWranglerDryRun(testConfigPath, plan.outdir, plan.env, deadline, plan.buildCwd);
       const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
       copyAdditionalModules(plan);
       writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, builtMain, state: "success" });
@@ -576,6 +586,7 @@ const resolveInlineConfig = (
 
   return {
     additionalModuleSourceRoots: getAdditionalModuleSourceRoots(root ?? process.cwd()),
+    buildCwd: path.resolve(root ?? process.cwd()),
     config: resolvedConfig,
     configPath,
     outdir,
@@ -617,6 +628,7 @@ const resolveWorkerConfig = (input: WorkerInput, root: string | undefined, fallb
         root,
         process.cwd(),
       ),
+      buildCwd: configDirectory,
       config,
       configPath: resolvedConfigPath,
       outdir: getWorkerBuildOutdir(path.dirname(resolvedConfigPath), config.name ?? fallbackWorkerName),
@@ -639,13 +651,22 @@ const prepareWorkerInput = (
   const env = "env" in input ? input.env : undefined;
   const {
     additionalModuleSourceRoots,
+    buildCwd,
     config: resolvedConfig,
     outdir,
   } = resolveWorkerConfig(input, root, worker.name ?? key);
   const config = resolvedConfig as Record<string, any>;
   const workerName = worker.name ?? config.name ?? key;
   const testConfig = withTestEnvironmentDefine(config);
-  const buildPlan = createWorkerBuildPlan(workerName, outdir, testConfig, config, env, additionalModuleSourceRoots);
+  const buildPlan = createWorkerBuildPlan(
+    workerName,
+    outdir,
+    buildCwd,
+    testConfig,
+    config,
+    env,
+    additionalModuleSourceRoots,
+  );
   const buildResult = buildWorkerOnce(buildPlan);
   const browserConfig = (testConfig as Record<string, unknown>).browser;
   const browserBindingName =
