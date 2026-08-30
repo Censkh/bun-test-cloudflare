@@ -375,6 +375,10 @@ test("copies explicit additional modules without recursively copying harness bui
   const sourceModulePath = path.join(moduleRoot, "node_modules/payload/dist/uploads/isImage.js");
   const outsideModulePath = path.join(testRoot, "outside.wasm");
   const staleOutdirModulePath = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms/stale.wasm");
+  const activeSlotWrapperPath = path.join(
+    moduleRoot,
+    "node_modules/.btcf/worker-build/copy-modules-cms/copy-modules-cms--btcf-slot-0.test.cache-bridge.js",
+  );
   const staleHarnessModulePath = path.join(
     moduleRoot,
     "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js",
@@ -387,6 +391,7 @@ test("copies explicit additional modules without recursively copying harness bui
   writeFileSync(outsideModulePath, "outside");
   writeFileSync(staleHarnessModulePath, "export const stale = true;\n");
   writeFileSync(staleOutdirModulePath, "stale");
+  writeFileSync(activeSlotWrapperPath, "export default {};\n");
 
   const harness = createCloudflareHarness({
     root: moduleRoot,
@@ -411,6 +416,7 @@ test("copies explicit additional modules without recursively copying harness bui
 
   const outdir = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms");
   expect(existsSync(staleOutdirModulePath)).toBe(false);
+  expect(existsSync(activeSlotWrapperPath)).toBe(true);
   expect(existsSync(path.join(outdir, "node_modules/payload/dist/uploads/isImage.js"))).toBe(true);
   expect(existsSync(path.join(outdir, "outside.wasm"))).toBe(false);
   expect(

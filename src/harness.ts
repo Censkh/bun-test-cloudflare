@@ -475,6 +475,21 @@ const copyAdditionalModules = (plan: WorkerBuildPlan) => {
   }
 };
 
+const isolatedWorkerSlotModulePattern = /\.cache-(?:bridge|namespace)\.js$/;
+
+const cleanWorkerBuildOutput = (outdir: string) => {
+  if (!existsSync(outdir)) {
+    return;
+  }
+
+  for (const entry of readdirSync(outdir)) {
+    if (isolatedWorkerSlotModulePattern.test(entry)) {
+      continue;
+    }
+    rmSync(path.join(outdir, entry), { force: true, recursive: true });
+  }
+};
+
 const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   const deadline = Date.now() + buildInitializationTimeoutMs;
   return withBuildLock(plan.outdir, deadline, () => {
@@ -488,7 +503,7 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
       }
     }
 
-    rmSync(plan.outdir, { force: true, recursive: true });
+    cleanWorkerBuildOutput(plan.outdir);
     mkdirSync(plan.outdir, { recursive: true });
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
