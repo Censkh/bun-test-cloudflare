@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import { drainHarnessRun } from "../src/HarnessRunTeardown";
 import {
   drainBrowserRenderingLaunches,
+  isBrowserRenderingLaunch,
   trackBrowserLaunch,
   trackBrowserRenderingLaunchRequest,
 } from "../src/patches/BrowserRenderingPatch";
@@ -19,6 +20,13 @@ class FakeResponse extends EventEmitter {
     return super.off(eventName, listener);
   }
 }
+
+test("browser launch detection ignores non-string spawn arguments", () => {
+  expect(isBrowserRenderingLaunch("chrome", [{ detached: true }, "--user-data-dir=/tmp/profile"])).toBe(false);
+  expect(isBrowserRenderingLaunch("chrome", ["--user-data-dir=/tmp/miniflare-test/browser-rendering/profile-1"])).toBe(
+    true,
+  );
+});
 
 test("non-browser harness cleanup does not wait on unrelated browser launches", async () => {
   const response = new FakeResponse();

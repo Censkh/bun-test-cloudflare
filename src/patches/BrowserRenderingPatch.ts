@@ -11,9 +11,12 @@ const pendingBrowserLaunchRequests = new Set<Promise<void>>();
 const pendingBrowserLaunchRequestSettlers: Array<() => void> = [];
 let observedBrowserRenderingLaunchCount = 0;
 
-const isBrowserRenderingLaunch = (_command: string, args?: readonly string[]) => {
+export const isBrowserRenderingLaunch = (_command: string, args?: readonly unknown[]) => {
   return (
-    args?.some((arg) => arg.startsWith("--user-data-dir=") && browserRenderingProfilePathPattern.test(arg)) ?? false
+    args?.some(
+      (arg) =>
+        typeof arg === "string" && arg.startsWith("--user-data-dir=") && browserRenderingProfilePathPattern.test(arg),
+    ) ?? false
   );
 };
 
