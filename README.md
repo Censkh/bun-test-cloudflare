@@ -11,6 +11,8 @@ Bun test support and a typed harness wrapper for Cloudflare Workers projects, wi
 
 The setup installs only the Bun/Miniflare compatibility patches still needed for the active Bun version. It also provides a minimal `cloudflare:workers` `DurableObject` shim for plain Bun module imports.
 
+Version gates use `Bun.semver.satisfies`. Bun >=1.4.2 additionally disables `miniflare-form-data`, `worker-threads-fifo`, and `worker-threads-no-timeouts`. Prerelease and invalid versions keep the patches enabled unless explicitly disabled through `BUN_TEST_CLOUDFLARE_DISABLED_PATCHES`; build metadata does not affect version matching.
+
 ## Install
 
 ```sh
