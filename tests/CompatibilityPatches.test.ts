@@ -105,8 +105,8 @@ test("uses semver ranges for prereleases, metadata and invalid versions", () => 
   ).toEqual(new Set(["miniflare-form-data"]));
 });
 
-test("disables only the three newly audited patches starting at Bun 1.4.2", () => {
-  const addedPatches = ["miniflare-form-data", "worker-threads-fifo", "worker-threads-no-timeouts"] as const;
+test("disables only the two newly audited patches starting at Bun 1.4.2", () => {
+  const addedPatches = ["worker-threads-fifo", "worker-threads-no-timeouts"] as const;
   const previous = getDisabledCompatibilityPatches({}, "1.4.1");
   for (const version of ["1.4.2", "1.4.2+build.1", "1.4.3", "1.5.0", "2.0.0"]) {
     expect(getDisabledCompatibilityPatches({}, version)).toEqual(new Set([...previous, ...addedPatches]));
@@ -115,5 +115,23 @@ test("disables only the three newly audited patches starting at Bun 1.4.2", () =
     for (const version of ["1.3.14", "1.4.0", "1.4.1", "1.4.2-canary.1"]) {
       expect(shouldInstallCompatibilityPatch(patchName, {}, version)).toBeTrue();
     }
+  }
+});
+
+test("keeps FormData compatible with Miniflare Request and Response across Bun versions", () => {
+  for (const version of ["1.3.14", "1.4.2", "1.4.3-canary.1", "2.0.0"]) {
+    for (const patchName of ["miniflare-request", "miniflare-response", "miniflare-form-data"] as const) {
+      expect(shouldInstallCompatibilityPatch(patchName, {}, version)).toBeTrue();
+    }
+  }
+});
+
+test("uses Bun's full revision including prerelease identifiers by default", () => {
+  const result = Bun.spawnSync([process.execPath, "--revision"]);
+  expect(result.exitCode).toBe(0);
+  const version = result.stdout.toString().trim();
+  expect(getDisabledCompatibilityPatches({})).toEqual(getDisabledCompatibilityPatches({}, version));
+  if (version.includes("-canary")) {
+    expect(getDisabledCompatibilityPatches({})).toEqual(new Set());
   }
 });

@@ -19,6 +19,7 @@ jobs:
       matrix:
         bun-version:
           - "1.3.14"
+          - "1.4.2"
           - canary
         wrangler-version:
           - "4.104.0"
