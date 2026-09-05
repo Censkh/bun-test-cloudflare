@@ -1,121 +1,71 @@
-export const compatibilityPatchNames = [
-  "web-streams",
-  "web-streams-readable-constructor",
-  "web-streams-writable-constructor",
-  "web-streams-readable-prototype",
-  "web-streams-writable-prototype",
-  "global-caches",
-  "global-caches-install",
-  "global-caches-default",
-  "global-caches-named",
-  "child-process-extra-fd",
-  "workerd-child-process",
-  "workerd-child-process-stdio-errors",
-  "workerd-child-process-unref",
-  "workerd-child-process-stdio-unref",
-  "browser-rendering",
-  "browser-rendering-spawn",
-  "undici",
-  "undici-mark-as-uncloneable",
-  "undici-commonjs-require",
-  "undici-esm-module",
-  "websocket",
-  "websocket-module",
-  "websocket-global",
-  "worker-threads",
-  "worker-threads-fifo",
-  "worker-threads-stream-bridge",
-  "worker-threads-no-timeouts",
-  "miniflare-web-globals",
-  "miniflare-request",
-  "miniflare-response",
-  "miniflare-headers",
-  "miniflare-form-data",
-  "wrangler-guess-worker-format",
-  "miniflare-loopback",
-  "miniflare-loopback-launch",
-  "miniflare-loopback-close",
-  "miniflare",
-  "miniflare-platform-proxy-dispatch",
-  "platform-proxy-response-drain",
-  "cloudflare-workers",
-  "cloudflare-workers-durable-object",
-  "cloudflare-workers-worker-entrypoint",
-  "wrangler-dev-env",
-  "wrangler-dev-env-runtime-errors",
-  "wrangler-dev-env-capture",
-  "wrangler-dev-env-force-local",
-  "wrangler-dev-env-persist",
-] as const;
+import { semver } from "bun";
 
-export type CompatibilityPatchName = (typeof compatibilityPatchNames)[number];
+export const COMPATABILITY_PATCHES = {
+  // Disabled from Bun 1.4.0.
+  "web-streams-readable-constructor": { id: "web-streams-readable-constructor", disabledFromVersion: "1.4.0" },
+  "web-streams-writable-constructor": { id: "web-streams-writable-constructor", disabledFromVersion: "1.4.0" },
+  "web-streams-readable-prototype": { id: "web-streams-readable-prototype", disabledFromVersion: "1.4.0" },
+  "web-streams-writable-prototype": { id: "web-streams-writable-prototype", disabledFromVersion: "1.4.0" },
+  "global-caches-named": { id: "global-caches-named", disabledFromVersion: "1.4.0" },
+  "child-process-extra-fd": { id: "child-process-extra-fd", disabledFromVersion: "1.4.0" },
+  "workerd-child-process-unref": { id: "workerd-child-process-unref", disabledFromVersion: "1.4.0" },
+  "workerd-child-process-stdio-unref": { id: "workerd-child-process-stdio-unref", disabledFromVersion: "1.4.0" },
+  "undici-mark-as-uncloneable": { id: "undici-mark-as-uncloneable", disabledFromVersion: "1.4.0" },
+  "undici-commonjs-require": { id: "undici-commonjs-require", disabledFromVersion: "1.4.0" },
+  websocket: { id: "websocket", disabledFromVersion: "1.4.0" },
+  "miniflare-headers": { id: "miniflare-headers", disabledFromVersion: "1.4.0" },
+  "wrangler-guess-worker-format": { id: "wrangler-guess-worker-format", disabledFromVersion: "1.4.0" },
+  "miniflare-loopback": { id: "miniflare-loopback", disabledFromVersion: "1.4.0" },
+  "miniflare-loopback-launch": { id: "miniflare-loopback-launch", disabledFromVersion: "1.4.0" },
+  "miniflare-loopback-close": { id: "miniflare-loopback-close", disabledFromVersion: "1.4.0" },
+  miniflare: { id: "miniflare", disabledFromVersion: "1.4.0" },
+  "miniflare-platform-proxy-dispatch": { id: "miniflare-platform-proxy-dispatch", disabledFromVersion: "1.4.0" },
+  "platform-proxy-response-drain": { id: "platform-proxy-response-drain", disabledFromVersion: "1.4.0" },
+  "wrangler-dev-env-runtime-errors": { id: "wrangler-dev-env-runtime-errors", disabledFromVersion: "1.4.0" },
+  "wrangler-dev-env-persist": { id: "wrangler-dev-env-persist", disabledFromVersion: "1.4.0" },
 
-type BunVersion = {
-  major: number;
-  minor: number;
-  patch: number;
-};
+  // Disabled from Bun 1.4.2.
+  "worker-threads-fifo": { id: "worker-threads-fifo", disabledFromVersion: "1.4.2" },
+  "worker-threads-no-timeouts": { id: "worker-threads-no-timeouts", disabledFromVersion: "1.4.2" },
+  "miniflare-form-data": { id: "miniflare-form-data", disabledFromVersion: "1.4.2" },
+
+  // No automatic disable version.
+  "web-streams": { id: "web-streams", disabledFromVersion: null },
+  "global-caches": { id: "global-caches", disabledFromVersion: null },
+  "global-caches-install": { id: "global-caches-install", disabledFromVersion: null },
+  "global-caches-default": { id: "global-caches-default", disabledFromVersion: null },
+  "workerd-child-process": { id: "workerd-child-process", disabledFromVersion: null },
+  "workerd-child-process-stdio-errors": { id: "workerd-child-process-stdio-errors", disabledFromVersion: null },
+  "browser-rendering": { id: "browser-rendering", disabledFromVersion: null },
+  "browser-rendering-spawn": { id: "browser-rendering-spawn", disabledFromVersion: null },
+  undici: { id: "undici", disabledFromVersion: null },
+  "undici-esm-module": { id: "undici-esm-module", disabledFromVersion: null },
+  "websocket-module": { id: "websocket-module", disabledFromVersion: null },
+  "websocket-global": { id: "websocket-global", disabledFromVersion: null },
+  "worker-threads": { id: "worker-threads", disabledFromVersion: null },
+  "worker-threads-stream-bridge": { id: "worker-threads-stream-bridge", disabledFromVersion: null },
+  "miniflare-web-globals": { id: "miniflare-web-globals", disabledFromVersion: null },
+  "miniflare-request": { id: "miniflare-request", disabledFromVersion: null },
+  "miniflare-response": { id: "miniflare-response", disabledFromVersion: null },
+  "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
+  "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
+  "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },
+  "wrangler-dev-env": { id: "wrangler-dev-env", disabledFromVersion: null },
+  "wrangler-dev-env-capture": { id: "wrangler-dev-env-capture", disabledFromVersion: null },
+  "wrangler-dev-env-force-local": { id: "wrangler-dev-env-force-local", disabledFromVersion: null },
+} as const satisfies Record<string, { id: string; disabledFromVersion: string | null }>;
+
+export type CompatibilityPatchName = (typeof COMPATABILITY_PATCHES)[keyof typeof COMPATABILITY_PATCHES]["id"];
+
+export const compatibilityPatchNames = Object.values(COMPATABILITY_PATCHES).map((patch) => patch.id);
 
 type PatchEnvironment = {
-  BUN_TEST_CLOUDFLARE_BUN_1_4_DISABLED_PATCHES?: string;
   BUN_TEST_CLOUDFLARE_DISABLED_PATCHES?: string;
 };
 
-const bun14: BunVersion = { major: 1, minor: 4, patch: 0 };
-
-const bun14DisabledCompatibilityPatches = new Set<CompatibilityPatchName>([
-  "web-streams-readable-constructor",
-  "web-streams-writable-constructor",
-  "web-streams-readable-prototype",
-  "web-streams-writable-prototype",
-  "child-process-extra-fd",
-  "workerd-child-process-unref",
-  "workerd-child-process-stdio-unref",
-  "undici-mark-as-uncloneable",
-  "undici-commonjs-require",
-  "miniflare-headers",
-  "wrangler-guess-worker-format",
-  "miniflare-loopback",
-  "miniflare-loopback-launch",
-  "miniflare-loopback-close",
-  "miniflare",
-  "miniflare-platform-proxy-dispatch",
-  "platform-proxy-response-drain",
-  "global-caches-named",
-  "websocket",
-  "wrangler-dev-env-runtime-errors",
-  "wrangler-dev-env-persist",
-]);
-
-const parseBunVersion = (version: string | undefined): BunVersion | undefined => {
-  const match = version?.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-  if (!match) {
-    return undefined;
-  }
-
-  return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3] ?? 0),
-  };
-};
-
-export const isBunVersionAtLeast = (version: string | undefined, minimum: BunVersion) => {
-  const parsedVersion = parseBunVersion(version);
-  if (!parsedVersion) {
-    return false;
-  }
-
-  if (parsedVersion.major !== minimum.major) {
-    return parsedVersion.major > minimum.major;
-  }
-  if (parsedVersion.minor !== minimum.minor) {
-    return parsedVersion.minor > minimum.minor;
-  }
-  return parsedVersion.patch >= minimum.patch;
-};
-
-export const isBun14OrLater = (version = process.versions.bun) => isBunVersionAtLeast(version, bun14);
+// Standard ranges exclude prereleases and reject invalid versions.
+export const isBunVersionAtLeast = (version: string | undefined, minimum: string) =>
+  version !== undefined && semver.satisfies(version, `>=${minimum}`);
 
 const parsePatchNames = (value: string | undefined) =>
   new Set(
@@ -139,12 +89,9 @@ export const getDisabledCompatibilityPatches = (
   bunVersion = process.versions.bun,
 ) => {
   const disabledPatchNames = parsePatchNames(environment.BUN_TEST_CLOUDFLARE_DISABLED_PATCHES);
-  if (isBun14OrLater(bunVersion)) {
-    for (const patchName of bun14DisabledCompatibilityPatches) {
-      disabledPatchNames.add(patchName);
-    }
-    for (const patchName of parsePatchNames(environment.BUN_TEST_CLOUDFLARE_BUN_1_4_DISABLED_PATCHES)) {
-      disabledPatchNames.add(patchName);
+  for (const patch of Object.values(COMPATABILITY_PATCHES)) {
+    if (patch.disabledFromVersion !== null && isBunVersionAtLeast(bunVersion, patch.disabledFromVersion)) {
+      disabledPatchNames.add(patch.id);
     }
   }
   assertKnownPatchNames(disabledPatchNames);

@@ -1,30 +1,16 @@
 import { expect, test } from "bun:test";
 import {
   getDisabledCompatibilityPatches,
-  isBun14OrLater,
   isBunVersionAtLeast,
   shouldInstallCompatibilityPatch,
   shouldInstallCompatibilityPatchGroup,
 } from "../src/CompatibilityPatches";
 
 test("recognises Bun 1.4 versions", () => {
-  expect(isBun14OrLater("1.3.14")).toBeFalse();
-  expect(isBun14OrLater("1.4.0")).toBeTrue();
-  expect(isBun14OrLater("1.4.0-canary.1")).toBeTrue();
-  expect(isBunVersionAtLeast("2.0.0", { major: 1, minor: 4, patch: 0 })).toBeTrue();
-});
-
-test("applies extra Bun 1.4 patch disables only on Bun 1.4 and later", () => {
-  const environment = {
-    BUN_TEST_CLOUDFLARE_BUN_1_4_DISABLED_PATCHES: "websocket, worker-threads,worker-threads-fifo",
-  };
-
-  expect(getDisabledCompatibilityPatches(environment, "1.3.14")).toEqual(new Set());
-  expect(shouldInstallCompatibilityPatch("websocket", environment, "1.4.0")).toBeFalse();
-  expect(shouldInstallCompatibilityPatch("worker-threads", environment, "1.4.0")).toBeFalse();
-  expect(shouldInstallCompatibilityPatch("worker-threads-fifo", environment, "1.4.0")).toBeFalse();
-  expect(shouldInstallCompatibilityPatch("websocket", environment, "1.3.14")).toBeTrue();
-  expect(shouldInstallCompatibilityPatch("worker-threads", environment, "1.3.14")).toBeTrue();
+  expect(isBunVersionAtLeast("1.3.14", "1.4.0")).toBeFalse();
+  expect(isBunVersionAtLeast("1.4.0", "1.4.0")).toBeTrue();
+  expect(isBunVersionAtLeast("1.4.0-canary.1", "1.4.0")).toBeFalse();
+  expect(isBunVersionAtLeast("2.0.0", "1.4.0")).toBeTrue();
 });
 
 test("keeps the Bun 1.4 audited patch boundary", () => {
@@ -105,4 +91,29 @@ test("rejects unknown compatibility patch names", () => {
   expect(() => getDisabledCompatibilityPatches({ BUN_TEST_CLOUDFLARE_DISABLED_PATCHES: "missing" })).toThrow(
     "Unknown bun-test-cloudflare compatibility patch: missing",
   );
+});
+
+test("uses semver ranges for prereleases, metadata and invalid versions", () => {
+  for (const version of [undefined, "", "invalid", "1.4", "1.4.2junk", "1.4.2-canary.1", "1.4.3-canary.1"]) {
+    expect(isBunVersionAtLeast(version, "1.4.2")).toBeFalse();
+  }
+  expect(isBunVersionAtLeast("1.4.2+744846f84", "1.4.2")).toBeTrue();
+  expect(getDisabledCompatibilityPatches({}, "invalid")).toEqual(new Set());
+  expect(getDisabledCompatibilityPatches({}, "1.4.2-canary.1")).toEqual(new Set());
+  expect(
+    getDisabledCompatibilityPatches({ BUN_TEST_CLOUDFLARE_DISABLED_PATCHES: "miniflare-form-data" }, "1.4.2-canary.1"),
+  ).toEqual(new Set(["miniflare-form-data"]));
+});
+
+test("disables only the three newly audited patches starting at Bun 1.4.2", () => {
+  const addedPatches = ["miniflare-form-data", "worker-threads-fifo", "worker-threads-no-timeouts"] as const;
+  const previous = getDisabledCompatibilityPatches({}, "1.4.1");
+  for (const version of ["1.4.2", "1.4.2+build.1", "1.4.3", "1.5.0", "2.0.0"]) {
+    expect(getDisabledCompatibilityPatches({}, version)).toEqual(new Set([...previous, ...addedPatches]));
+  }
+  for (const patchName of addedPatches) {
+    for (const version of ["1.3.14", "1.4.0", "1.4.1", "1.4.2-canary.1"]) {
+      expect(shouldInstallCompatibilityPatch(patchName, {}, version)).toBeTrue();
+    }
+  }
 });
