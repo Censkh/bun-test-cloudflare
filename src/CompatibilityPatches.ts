@@ -1,4 +1,8 @@
-import { semver } from "bun";
+import { semver, spawnSync } from "bun";
+
+// Bun.version and process.versions.bun omit the canary suffix on some builds.
+const revision = spawnSync([process.execPath, "--revision"], { timeout: 5_000 });
+const runtimeBunVersion = revision.exitCode === 0 ? revision.stdout.toString().trim() : undefined;
 
 export const COMPATABILITY_PATCHES = {
   // Disabled from Bun 1.4.0.
@@ -29,6 +33,8 @@ export const COMPATABILITY_PATCHES = {
   "worker-threads-no-timeouts": { id: "worker-threads-no-timeouts", disabledFromVersion: "1.4.2" },
 
   // No automatic disable version.
+  // FormData must remain compatible with the Miniflare Request/Response overrides.
+  "miniflare-form-data": { id: "miniflare-form-data", disabledFromVersion: null },
   "web-streams": { id: "web-streams", disabledFromVersion: null },
   "global-caches": { id: "global-caches", disabledFromVersion: null },
   "global-caches-install": { id: "global-caches-install", disabledFromVersion: null },
@@ -86,7 +92,7 @@ const assertKnownPatchNames = (patchNames: Set<string>) => {
 
 export const getDisabledCompatibilityPatches = (
   environment: PatchEnvironment = process.env as PatchEnvironment,
-  bunVersion = process.versions.bun,
+  bunVersion = runtimeBunVersion,
 ) => {
   const disabledPatchNames = parsePatchNames(environment.BUN_TEST_CLOUDFLARE_DISABLED_PATCHES);
   for (const patch of Object.values(COMPATABILITY_PATCHES)) {
@@ -101,14 +107,14 @@ export const getDisabledCompatibilityPatches = (
 export const shouldInstallCompatibilityPatch = (
   patchName: CompatibilityPatchName,
   environment: PatchEnvironment = process.env as PatchEnvironment,
-  bunVersion = process.versions.bun,
+  bunVersion = runtimeBunVersion,
 ) => !getDisabledCompatibilityPatches(environment, bunVersion).has(patchName);
 
 export const shouldInstallCompatibilityPatchGroup = (
   patchName: CompatibilityPatchName,
   childPatchNames: readonly CompatibilityPatchName[],
   environment: PatchEnvironment = process.env as PatchEnvironment,
-  bunVersion = process.versions.bun,
+  bunVersion = runtimeBunVersion,
 ) =>
   shouldInstallCompatibilityPatch(patchName, environment, bunVersion) &&
   childPatchNames.some((childPatchName) => shouldInstallCompatibilityPatch(childPatchName, environment, bunVersion));
