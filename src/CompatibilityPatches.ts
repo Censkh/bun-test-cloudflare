@@ -52,7 +52,6 @@ export const COMPATABILITY_PATCHES = {
   "miniflare-web-globals": { id: "miniflare-web-globals", disabledFromVersion: null },
   "miniflare-request": { id: "miniflare-request", disabledFromVersion: null },
   "miniflare-response": { id: "miniflare-response", disabledFromVersion: null },
-  "miniflare-form-data": { id: "miniflare-form-data", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },
