@@ -116,34 +116,52 @@ const deserializeRequest = ({ headers, method, url }) => new Request(url, { head
 
 const getCache = (cacheName) => cacheName === undefined ? caches.default : caches.open(cacheName);
 
+const arrayBufferToBase64 = (buffer) => {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+};
+
+const base64ToArrayBuffer = (base64) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+};
+
 const handleCacheBridge = async (request) => {
-  const form = await request.formData();
-  const rawMetadata = form.get("metadata");
-  if (typeof rawMetadata !== "string") return new Response("Missing cache metadata", { status: 400 });
-  const metadata = JSON.parse(rawMetadata);
+  const payload = await request.json();
+  const metadata = payload.metadata;
+  if (!metadata) return new Response("Missing cache metadata", { status: 400 });
   const cache = await getCache(metadata.cacheName);
   const cacheRequest = deserializeRequest(metadata.request);
-  const result = new FormData();
 
   if (metadata.operation === "delete") {
-    result.set("metadata", JSON.stringify({ deleted: await cache.delete(cacheRequest, metadata.options) }));
+    return Response.json({ metadata: { deleted: await cache.delete(cacheRequest, metadata.options) } });
   } else if (metadata.operation === "match") {
     const response = await cache.match(cacheRequest, metadata.options);
-    result.set("metadata", JSON.stringify({ response: response ? {
-      headers: [...response.headers],
-      status: response.status,
-      statusText: response.statusText,
-    } : undefined }));
-    if (response) result.set("body", await response.blob(), "body");
+    return Response.json({
+      metadata: {
+        response: response ? {
+          headers: [...response.headers],
+          status: response.status,
+          statusText: response.statusText,
+        } : undefined,
+      },
+      bodyBase64: response ? arrayBufferToBase64(await response.arrayBuffer()) : undefined,
+    });
   } else if (metadata.operation === "put") {
-    const body = form.get("body");
-    await cache.put(cacheRequest, new Response(body instanceof Blob ? body : null, metadata.response));
-    result.set("metadata", "{}");
+    const body = payload.bodyBase64 ? base64ToArrayBuffer(payload.bodyBase64) : null;
+    await cache.put(cacheRequest, new Response(body, metadata.response));
+    return Response.json({ metadata: {} });
   } else {
     return new Response("Unknown cache operation", { status: 400 });
   }
-
-  return new Response(result);
 };
 
 const maybeHandleCacheBridge = (request) => {

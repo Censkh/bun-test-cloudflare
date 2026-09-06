@@ -27,7 +27,6 @@ export const COMPATABILITY_PATCHES = {
   // Disabled from Bun 1.4.2.
   "worker-threads-fifo": { id: "worker-threads-fifo", disabledFromVersion: "1.4.2" },
   "worker-threads-no-timeouts": { id: "worker-threads-no-timeouts", disabledFromVersion: "1.4.2" },
-  "miniflare-form-data": { id: "miniflare-form-data", disabledFromVersion: "1.4.2" },
 
   // No automatic disable version.
   "web-streams": { id: "web-streams", disabledFromVersion: null },
@@ -47,6 +46,7 @@ export const COMPATABILITY_PATCHES = {
   "miniflare-web-globals": { id: "miniflare-web-globals", disabledFromVersion: null },
   "miniflare-request": { id: "miniflare-request", disabledFromVersion: null },
   "miniflare-response": { id: "miniflare-response", disabledFromVersion: null },
+  "miniflare-form-data": { id: "miniflare-form-data", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },

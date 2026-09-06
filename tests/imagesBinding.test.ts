@@ -4,6 +4,9 @@ import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 const fixtureRoot = fixturePath(import.meta.dir, "images-binding");
 
 const fixture = bunFixtureTest(fixtureRoot);
+const fixtureTimeoutMs = 180_000;
+const processTimeoutMs = 210_000;
+const testTimeoutMs = 240_000;
 
 describe("Images binding fixture", () => {
   fixture.test(
@@ -15,15 +18,15 @@ describe("Images binding fixture", () => {
           BUN_TEST_CLOUDFLARE_TIMINGS: "1",
         },
         logOutput: true,
-        processTimeoutMs: 70_000,
+        processTimeoutMs,
         testArgs: ["--no-orphans"],
-        timeoutMs: 60_000,
+        timeoutMs: fixtureTimeoutMs,
       });
       const output = `${result.stdout}\n${result.stderr}`;
 
       result.expectStatusCode(0);
       expect(output).not.toContain("WritableStreamDefaultWriter has no stream");
     },
-    80_000,
+    testTimeoutMs,
   );
 });

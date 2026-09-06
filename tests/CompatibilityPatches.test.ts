@@ -105,11 +105,12 @@ test("uses semver ranges for prereleases, metadata and invalid versions", () => 
   ).toEqual(new Set(["miniflare-form-data"]));
 });
 
-test("disables only the three newly audited patches starting at Bun 1.4.2", () => {
-  const addedPatches = ["miniflare-form-data", "worker-threads-fifo", "worker-threads-no-timeouts"] as const;
+test("disables only the two newly audited patches starting at Bun 1.4.2", () => {
+  const addedPatches = ["worker-threads-fifo", "worker-threads-no-timeouts"] as const;
   const previous = getDisabledCompatibilityPatches({}, "1.4.1");
   for (const version of ["1.4.2", "1.4.2+build.1", "1.4.3", "1.5.0", "2.0.0"]) {
     expect(getDisabledCompatibilityPatches({}, version)).toEqual(new Set([...previous, ...addedPatches]));
+    expect(shouldInstallCompatibilityPatch("miniflare-form-data", {}, version)).toBeTrue();
   }
   for (const patchName of addedPatches) {
     for (const version of ["1.3.14", "1.4.0", "1.4.1", "1.4.2-canary.1"]) {

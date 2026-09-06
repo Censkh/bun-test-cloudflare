@@ -34,6 +34,16 @@ type CacheBridgeMetadata = {
   response?: SerializedCacheResponse;
 };
 
+type CacheBridgePayload = {
+  bodyBase64?: string;
+  metadata: CacheBridgeMetadata;
+};
+
+type CacheBridgeResult<T> = {
+  bodyBase64?: string;
+  metadata: T;
+};
+
 export const WORKER_CACHE_BRIDGE_PATH = "/__bun-test-cloudflare/cache";
 export const WORKER_CACHE_BRIDGE_SECRET_HEADER = "x-bun-test-cloudflare-cache-secret";
 
@@ -150,59 +160,64 @@ const serializeCacheRequest = (input: RequestInfo | URL): SerializedCacheRequest
   };
 };
 
-const createCacheBridgeForm = (metadata: CacheBridgeMetadata, body?: Blob) => {
-  const form = new FormData();
-  form.set("metadata", JSON.stringify(metadata));
-  if (body) {
-    form.set("body", body, "body");
-  }
-  return form;
+const arrayBufferToBase64 = (buffer: ArrayBuffer) => Buffer.from(buffer).toString("base64");
+
+const base64ToArrayBuffer = (base64: string) => {
+  const buffer = Buffer.from(base64, "base64");
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+};
+
+const createCacheBridgePayload = async (metadata: CacheBridgeMetadata, body?: Blob): Promise<CacheBridgePayload> => {
+  return {
+    metadata,
+    bodyBase64: body ? arrayBufferToBase64(await body.arrayBuffer()) : undefined,
+  };
 };
 
 const readCacheBridgeMetadata = async <T>(response: Response) => {
   if (!response.ok) {
     throw new Error(`Worker cache bridge failed with HTTP ${response.status}: ${await response.text()}`);
   }
-  const form = await response.formData();
-  const metadata = form.get("metadata");
-  if (typeof metadata !== "string") {
-    throw new Error("Worker cache bridge returned invalid metadata");
-  }
-  return { body: form.get("body"), metadata: JSON.parse(metadata) as T };
+  return (await response.json()) as CacheBridgeResult<T>;
 };
 
 export const createWorkerCacheStorage = (worker: CacheBridgeWorker, secret: string): CacheStorage => {
-  const requestBridge = (form: FormData) =>
-    worker.fetch(`https://bun-test-cloudflare.invalid${WORKER_CACHE_BRIDGE_PATH}`, {
-      body: form,
-      headers: { [WORKER_CACHE_BRIDGE_SECRET_HEADER]: secret },
-      method: "POST",
-    });
+  const requestBridge = (payload: CacheBridgePayload | Promise<CacheBridgePayload>) =>
+    Promise.resolve(payload).then((resolvedPayload) =>
+      worker.fetch(`https://bun-test-cloudflare.invalid${WORKER_CACHE_BRIDGE_PATH}`, {
+        body: JSON.stringify(resolvedPayload),
+        headers: {
+          "Content-Type": "application/json",
+          [WORKER_CACHE_BRIDGE_SECRET_HEADER]: secret,
+        },
+        method: "POST",
+      }),
+    );
 
   const createCache = (cacheName?: string) =>
     ({
       async delete(input: RequestInfo | URL, options?: CacheQueryOptions) {
         const response = await requestBridge(
-          createCacheBridgeForm({ cacheName, operation: "delete", options, request: serializeCacheRequest(input) }),
+          createCacheBridgePayload({ cacheName, operation: "delete", options, request: serializeCacheRequest(input) }),
         );
         const result = await readCacheBridgeMetadata<{ deleted: boolean }>(response);
         return result.metadata.deleted;
       },
       async match(input: RequestInfo | URL, options?: CacheQueryOptions) {
         const response = await requestBridge(
-          createCacheBridgeForm({ cacheName, operation: "match", options, request: serializeCacheRequest(input) }),
+          createCacheBridgePayload({ cacheName, operation: "match", options, request: serializeCacheRequest(input) }),
         );
         const result = await readCacheBridgeMetadata<{ response?: SerializedCacheResponse }>(response);
         if (!result.metadata.response) {
           return undefined;
         }
-        const body = result.body instanceof Blob ? await result.body.arrayBuffer() : null;
+        const body = result.bodyBase64 ? base64ToArrayBuffer(result.bodyBase64) : null;
         return new Response(body, result.metadata.response);
       },
       async put(input: RequestInfo | URL, response: Response) {
         const responseBody = await response.blob();
         const bridgeResponse = await requestBridge(
-          createCacheBridgeForm(
+          createCacheBridgePayload(
             {
               cacheName,
               operation: "put",
