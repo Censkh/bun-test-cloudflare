@@ -594,7 +594,10 @@ const resolveInlineConfig = (
   const configPath = writeResolvedConfig(outdir, resolvedConfig);
 
   return {
-    additionalModuleSourceRoots: getAdditionalModuleSourceRoots(root ?? process.cwd()),
+    additionalModuleSourceRoots: getAdditionalModuleSourceRoots(
+      typeof resolvedMain === "string" ? path.dirname(resolvedMain) : undefined,
+      root ?? process.cwd(),
+    ),
     buildCwd: path.resolve(root ?? process.cwd()),
     config: resolvedConfig,
     configPath,

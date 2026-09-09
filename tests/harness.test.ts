@@ -157,6 +157,7 @@ const runFakeWranglerBuild = (command: string[]) => {
 };
 
 Bun.spawnSync = ((options: { cmd: string[]; cwd?: string; timeout?: number }) => {
+  if (Array.isArray(options)) return originalSpawnSync(options);
   spawnedCommands.push(options.cmd);
   spawnedWorkingDirectories.push(options.cwd);
   spawnedTimeouts.push(options.timeout);
@@ -462,6 +463,32 @@ test("copies explicit additional modules without recursively copying harness bui
       },
     ],
   });
+});
+
+test("inline prebuilt workers copy split modules relative to their entry point", async () => {
+  const root = path.join(testRoot, "inline-prebuilt-caller");
+  const buildRoot = path.join(testRoot, "inline-prebuilt-output");
+  mkdirSync(root, { recursive: true });
+  mkdirSync(path.join(buildRoot, "assets"), { recursive: true });
+  writeFileSync(path.join(buildRoot, "index.js"), "export default {};\n");
+  writeFileSync(path.join(buildRoot, "assets/locale.js"), "export default 'en';\n");
+  const harness = createCloudflareHarness({
+    root,
+    workers: {
+      CMS: {
+        config: {
+          name: "prebuilt-cms",
+          main: path.join(buildRoot, "index.js"),
+          no_bundle: true,
+          rules: [{ type: "ESModule", globs: ["assets/*.js"] }],
+        },
+      },
+    },
+  });
+  await harness.run(() => {});
+  expect(readFileSync(path.join(root, "node_modules/.btcf/worker-build/prebuilt-cms/assets/locale.js"), "utf8")).toBe(
+    "export default 'en';\n",
+  );
 });
 
 test("run starts the server, passes typed workers, and resets it before reuse", async () => {
