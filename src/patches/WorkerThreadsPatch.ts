@@ -34,6 +34,9 @@ ${
   const { MessageChannel } = require("worker_threads");
   const { port1, port2 } = new MessageChannel();
   const reader = stream.getReader();
+  // Keep the sender alive until the receiver consumes the terminal message.
+  // Closing sooner can drop queued messages on Bun.
+  port2.once("message", () => port2.close());
 
   (async () => {
     try {
@@ -49,7 +52,7 @@ ${
     } catch (error) {
       port2.postMessage({ error: serialiseError(error) });
     } finally {
-      port2.close();
+      reader.releaseLock();
     }
   })();
 
@@ -201,7 +204,7 @@ export const installWorkerThreadsPatch = () => {
         streamPort.on("message", (streamMessage: any) => {
           if (streamMessage.done) {
             controller.close();
-            streamPort.close();
+            streamPort.postMessage({ acknowledged: true });
             return;
           }
           if (streamMessage.error) {
@@ -211,7 +214,7 @@ export const installWorkerThreadsPatch = () => {
               error.stack = streamMessage.error.stack;
             }
             controller.error(error);
-            streamPort.close();
+            streamPort.postMessage({ acknowledged: true });
             return;
           }
           controller.enqueue(streamMessage.chunk);

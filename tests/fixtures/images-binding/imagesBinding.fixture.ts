@@ -220,6 +220,22 @@ test("transforms Images binding output from worker getEnv", async () => {
   });
 });
 
+test("consumes concurrent Images output streams through completion", async () => {
+  await harness.run(async (workers) => {
+    const env = await workers.IMAGE_WORKER.getEnv<ImagesEnv>();
+    const readOutput = async () => {
+      const output = await env.IMAGES.input(imageStream()).output({ format: "image/webp" });
+      return streamToBytes(output.image());
+    };
+    const expected = await readOutput();
+    expect(expected.byteLength).toBeGreaterThan(0);
+    for (let batch = 0; batch < 20; batch++) {
+      const outputs = await Promise.all(Array.from({ length: 5 }, readOutput));
+      for (const output of outputs) expect(output).toEqual(expected);
+    }
+  });
+});
+
 test("backend-like parallel oversized normalization reports unsupported HEIF errors", async () => {
   await harness.run(async (workers) => {
     const env = await workers.IMAGE_WORKER.getEnv<ImagesEnv>();
@@ -240,6 +256,11 @@ test("backend-like parallel oversized normalization reports unsupported HEIF err
         }),
       ),
     );
+
+    // An unsupported AVIF codec must not hide failures in the other formats.
+    for (const [index, result] of results.entries()) {
+      if (imageFormats[index].mimeType !== "image/avif") expect(result.status).toBe("fulfilled");
+    }
 
     const failure = results.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") {
