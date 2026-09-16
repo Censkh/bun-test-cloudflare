@@ -40,7 +40,6 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     vpc_networks: [{ binding: "VPC_NETWORK", network_id: "network" }],
     vpc_services: [{ binding: "VPC_SERVICE", service_id: "service" }],
     wasm_modules: { WASM: new Uint8Array([0]) },
-    websearch: { binding: "WEBSEARCH" },
     worker_loaders: [{ binding: "LOADER" }],
     workflows: [{ binding: "WORKFLOW", class_name: "FixtureWorkflow", name: "workflow" }],
   };
@@ -87,7 +86,6 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     "vpc_network",
     "vpc_service",
     "wasm_module",
-    "websearch",
     "worker_loader",
     "workflow",
   ]);
