@@ -43,7 +43,7 @@
     "@types/node": "^26.6.1",
     "@types/ws": "^8.18.1",
     "typescript": "7.0.2",
-    "wrangler": "4.129.0"
+    "wrangler": "4.135.0"
   },
   "peerDependencies": {
     "wrangler": ">=4.104.0"

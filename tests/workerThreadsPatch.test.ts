@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { shouldInstallCompatibilityPatch } from "../src/CompatibilityPatches";
 import { installWorkerThreadsPatch, patchSynchronousFetcherWorkerScript } from "../src/patches/WorkerThreadsPatch";
 
-test("patches Miniflare synchronous fetch worker to process messages FIFO", () => {
+test("bridges Miniflare synchronous fetch response streams without replacing its handler", () => {
   const script = `
 const { notifyHandle, port } = workerData;
 const beforeListener = true;
@@ -57,12 +57,10 @@ const afterListener = true;`;
 
   const patched = patchSynchronousFetcherWorkerScript(script);
 
-  expect(patched).toContain("let nextMessage = Promise.resolve();");
-  expect(patched).toContain("const createStreamBridge = (stream) => {");
-  expect(patched).toContain("const handleMessage = async (event) => {");
-  expect(patched).toContain("nextMessage = nextMessage.then(() => handleMessage(event), () => handleMessage(event));");
-  expect(patched).toContain("createStreamBridge(response.body)");
-  expect(patched).toContain("const body = await response.arrayBuffer();");
+  expect(patched).toContain("__bunTestCloudflareMessagePort.prototype.postMessage = function");
+  expect(patched).toContain("__bunTestCloudflareStreamPort: port1");
+  expect(patched).toContain('port.addEventListener("message", async (event) => {');
+  expect(patched).toContain("Atomics.store(notifyHandle, /* index */ 0, /* value */ 1);");
   expect(patched).toContain("const beforeListener = true;");
   expect(patched).toContain("const afterListener = true;");
 });
