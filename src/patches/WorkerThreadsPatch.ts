@@ -3,7 +3,6 @@ import type * as WorkerThreads from "node:worker_threads";
 import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 const synchronousFetcherMessageHandlerStart = `port.addEventListener("message", async (event) => {`;
-const synchronousFetcherMessageHandlerEnd = `\n\nport.start();`;
 const synchronousFetcherRequiredCode = `headers["${"MF-Op-Sync"}"] = "true";`;
 
 type WorkerThreadsPatchOptions = {
@@ -12,28 +11,31 @@ type WorkerThreadsPatchOptions = {
   noTimeouts: boolean;
 };
 
-const getSynchronousFetcherPatchedMessageHandler = ({ fifo, streamBridge, noTimeouts }: WorkerThreadsPatchOptions) => `
-${fifo ? "let nextMessage = Promise.resolve();" : ""}
-
-const serialiseError = (error) => ({
+const getSynchronousFetcherStreamBridgeBootstrap = ({ streamBridge }: WorkerThreadsPatchOptions) =>
+  streamBridge
+    ? `
+const { MessageChannel: __bunTestCloudflareMessageChannel, MessagePort: __bunTestCloudflareMessagePort } = require("worker_threads");
+const __bunTestCloudflarePostMessage = __bunTestCloudflareMessagePort.prototype.postMessage;
+const __bunTestCloudflareSerialiseError = (error) => ({
   message: error instanceof Error ? error.message : String(error),
   name: error instanceof Error ? error.name : "Error",
   stack: error instanceof Error ? error.stack : undefined,
 });
-
-const transferChunk = (chunk) => {
+const __bunTestCloudflareTransferChunk = (chunk) => {
   if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength) {
     return chunk;
   }
   return new Uint8Array(chunk);
 };
+__bunTestCloudflareMessagePort.prototype.postMessage = function (value, transferList) {
+  const response = value?.response;
+  const resultType = response?.headers?.["mf-op-result-type"] ?? response?.headers?.["MF-Op-Result-Type"];
+  if (resultType !== "ReadableStream" || !(response.body instanceof ReadableStream)) {
+    return __bunTestCloudflarePostMessage.call(this, value, transferList);
+  }
 
-${
-  streamBridge
-    ? `const createStreamBridge = (stream) => {
-  const { MessageChannel } = require("worker_threads");
-  const { port1, port2 } = new MessageChannel();
-  const reader = stream.getReader();
+  const { port1, port2 } = new __bunTestCloudflareMessageChannel();
+  const reader = response.body.getReader();
   // Keep the sender alive until the receiver consumes the terminal message.
   // Closing sooner can drop queued messages on Bun.
   port2.once("message", () => port2.close());
@@ -46,79 +48,23 @@ ${
           port2.postMessage({ done: true });
           break;
         }
-        const chunk = transferChunk(value);
+        const chunk = __bunTestCloudflareTransferChunk(value);
         port2.postMessage({ chunk }, [chunk.buffer]);
       }
     } catch (error) {
-      port2.postMessage({ error: serialiseError(error) });
+      port2.postMessage({ error: __bunTestCloudflareSerialiseError(error) });
     } finally {
       reader.releaseLock();
     }
   })();
 
-  return { body: { __bunTestCloudflareStreamPort: port1 }, transferList: [port1] };
+  return __bunTestCloudflarePostMessage.call(
+    this,
+    { ...value, response: { ...response, body: { __bunTestCloudflareStreamPort: port1 } } },
+    [port1],
+  );
 };`
-    : ""
-}
-
-const handleMessage = async (event) => {
-  const { id, method, url, headers, body } = event.data;
-  try {
-    if (dispatcherUrl !== url) {
-      dispatcherUrl = url;
-      dispatcher = new Pool(new URL(url).origin, {
-        connect: { rejectUnauthorized: false },
-        ${noTimeouts ? "headersTimeout: 0,\n        bodyTimeout: 0," : ""}
-      });
-    }
-    headers["${"MF-Op-Sync"}"] = "true";
-    // body cannot be a ReadableStream, so no need to specify duplex
-    const response = await fetch(url, { method, headers, body, dispatcher });
-    ${
-      streamBridge
-        ? `const isStreamResponse = response.headers.get("${"MF-Op-Result-Type"}") === "ReadableStream";
-    const { body: responseBody, transferList } = isStreamResponse && response.body
-      ? createStreamBridge(response.body)
-      : await (async () => {
-          const body = await response.arrayBuffer();
-          return { body, transferList: body === null ? undefined : [body] };
-        })();`
-        : `const responseBody = await response.arrayBuffer();
-    const transferList = responseBody === null ? undefined : [responseBody];`
-    }
-    port.postMessage(
-      {
-        id,
-        response: {
-          status: response.status,
-          headers: Object.fromEntries(response.headers),
-          body: responseBody,
-        }
-      },
-      transferList
-    );
-  } catch (error) {
-    try {
-      port.postMessage({ id, error });
-    } catch {
-      // If error failed to serialise, post simplified version
-      port.postMessage({ id, error: new Error(String(error)) });
-    }
-  } finally {
-    Atomics.store(notifyHandle, /* index */ 0, /* value */ 1);
-    Atomics.notify(notifyHandle, /* index */ 0);
-  }
-};
-
-${
-  fifo
-    ? `port.addEventListener("message", (event) => {
-  nextMessage = nextMessage.then(() => handleMessage(event), () => handleMessage(event));
-});`
-    : 'port.addEventListener("message", handleMessage);'
-}
-
-port.start();`;
+    : "";
 
 export const patchSynchronousFetcherWorkerScript = (
   script: string,
@@ -133,20 +79,10 @@ export const patchSynchronousFetcherWorkerScript = (
     return script;
   }
 
-  const endIndex = script.indexOf(synchronousFetcherMessageHandlerEnd, startIndex);
-  if (endIndex < 0) {
-    return script;
-  }
-
-  // Bun can overlap Miniflare synchronous proxy calls enough for the worker
-  // bridge to post responses out of order. Miniflare's host side expects the
-  // next port message id to match the blocked call, so process requests FIFO.
-  // Bun also cannot transfer the live response ReadableStream here, so proxy
-  // stream chunks over a MessagePort and reconstruct the stream in
-  // receiveMessageOnPort() below.
-  return `${script.slice(0, startIndex)}${getSynchronousFetcherPatchedMessageHandler(options)}${script.slice(
-    endIndex + synchronousFetcherMessageHandlerEnd.length,
-  )}`;
+  // Preserve Miniflare's handler and its private wake-up protocol. Bun cannot
+  // transfer its live response ReadableStream, so intercept only that message
+  // and bridge its chunks through a MessagePort.
+  return `${script.slice(0, startIndex)}${getSynchronousFetcherStreamBridgeBootstrap(options)}${script.slice(startIndex)}`;
 };
 
 export const installWorkerThreadsPatch = () => {
