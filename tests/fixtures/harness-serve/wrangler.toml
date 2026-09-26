@@ -1,0 +1,8 @@
+name = "harness-serve-fixture"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "KV"
+id = "harness-serve-kv"

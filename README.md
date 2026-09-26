@@ -122,6 +122,57 @@ Eligible harnesses use four isolated slots by default. Each slot is a distinct W
 
 Use the `workers` handles, `server.fetch()`, or `server.getWorker()` supplied to `run()` so requests follow the active slot. A URL returned by `server.listen()` addresses the generation's first physical Worker and should not be used with slotted harnesses.
 
+## Serve A Worker Over HTTP
+
+`harness.serve()` exposes one worker on a local port for the length of a harness run, for tests that need a real HTTP server, such as browser tests:
+
+```ts
+const server = await harness.serve({ worker: "BACKEND" });
+const response = await fetch(new URL("/health", server.url));
+await server.stop();
+```
+
+Responses are rebuilt as Bun's native `Response` (the preload swaps the global for Miniflare's class, which `Bun.serve` rejects). Every `Set-Cookie` header is kept, Miniflare's internal `MF-*` headers are dropped, redirects are passed through rather than followed, and bodies are passed on as streams. Wrangler may still deliver a streamed body in larger chunks than the worker wrote. WebSocket upgrades are proxied: the worker's socket is bridged to the client's, including messages the worker sends before the client finishes connecting.
+
+`fetch` handles requests before they reach the worker, for test-only routes such as seeding data. Return nothing to forward the request. Handlers run inside the harness run, so `getCloudflareHarnessRunContext()` works, and an error in one becomes a `500` instead of ending the run.
+
+```ts
+const server = await harness.serve({
+  worker: "BACKEND",
+  port: 43210,
+  fetch: async (request, { workers }) => {
+    if (new URL(request.url).pathname === "/__test/seed") {
+      const env = await workers.BACKEND.getEnv();
+      await env.KV.put("greeting", "hello");
+      return Response.json({ ok: true });
+    }
+  },
+});
+```
+
+### As A Browser Test Backend
+
+`serveHarnessUntilExit()` registers a Bun test that serves until the process receives `SIGINT` or `SIGTERM`, then stops the server and ends the run cleanly (Miniflare's own signal handlers would otherwise exit the process straight away). A second signal, or a stop that takes longer than 10 seconds, falls back to the original handlers.
+
+```ts
+// e2e/backend.ts
+import { serveHarnessUntilExit } from "bun-test-cloudflare";
+import { harness } from "../src/tests/harness";
+
+serveHarnessUntilExit(harness, { worker: "BACKEND", port: 43210 });
+```
+
+Run it with `bun test` so the preload and test lifecycle apply. With Playwright:
+
+```ts
+// playwright.config.ts
+webServer: {
+  command: "bun test ./e2e/backend.ts",
+  url: "http://127.0.0.1:43210/health",
+  reuseExistingServer: !process.env.CI,
+},
+```
+
 ## Profile Harness Time
 
 Set `BUN_TEST_CLOUDFLARE_TIMINGS=1` to print phase timings for Worker startup, lease acquisition, callback execution, storage reset, and cleanup. Fixture tests also forward their captured Worker timing logs in this mode.

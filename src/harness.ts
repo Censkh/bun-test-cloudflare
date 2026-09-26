@@ -22,6 +22,14 @@ import {
   type PreparedWorkerInput,
 } from "./HarnessRun";
 import {
+  type CloudflareHarnessServeContext,
+  type CloudflareHarnessServeOptions,
+  type CloudflareHarnessServer,
+  serveHarness,
+  serveHarnessUntilExit,
+  toNativeResponse,
+} from "./HarnessServer";
+import {
   closePrewarmedServerOrchestrators,
   PrewarmedServerOrchestrator,
   WARM_WORKERD_POOL_SIZE,
@@ -66,9 +74,19 @@ export type CloudflareHarness<TWorkers extends Record<string, CloudflareWorkerCo
   run<TResult>(
     callback: (workers: CloudflareWorkerMap<TWorkers>, server: TestHarness) => Promise<TResult> | TResult,
   ): Promise<TResult>;
+  /** Exposes one worker over HTTP for the length of a run, e.g. as a backend for browser tests. */
+  serve(options: CloudflareHarnessServeOptions<TWorkers>): Promise<CloudflareHarnessServer<TWorkers>>;
 };
 
-export { type CloudflareHarnessRunContext, getCloudflareHarnessRunContext };
+export {
+  type CloudflareHarnessRunContext,
+  type CloudflareHarnessServeContext,
+  type CloudflareHarnessServeOptions,
+  type CloudflareHarnessServer,
+  getCloudflareHarnessRunContext,
+  serveHarnessUntilExit,
+  toNativeResponse,
+};
 
 installWranglerPatches();
 const timingOrigin = performance.now();
@@ -766,7 +784,10 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
       : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize);
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
 
-  return {
+  const harness: CloudflareHarness<TWorkers> = {
+    serve(options) {
+      return serveHarness(harness, options);
+    },
     async run(callback) {
       const runStartedAt = performance.now();
       const acquireStartedAt = performance.now();
@@ -782,4 +803,5 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
       }
     },
   };
+  return harness;
 };

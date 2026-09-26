@@ -1,4 +1,6 @@
 import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
+// Imported for its side effect: it must capture the native classes before they are replaced
+import "../NativeWebGlobals";
 
 export const installMiniflareWebGlobalsPatch = () => {
   const path = require("node:path") as typeof import("node:path");
