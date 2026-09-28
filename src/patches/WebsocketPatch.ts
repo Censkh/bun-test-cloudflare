@@ -52,6 +52,14 @@ export const installWebsocketPatch = () => {
       return this.#readyState;
     }
 
+    addEventListener(...args: Parameters<WebSocket["addEventListener"]>) {
+      this.#socket.addEventListener(...args);
+    }
+
+    removeEventListener(...args: Parameters<WebSocket["removeEventListener"]>) {
+      this.#socket.removeEventListener(...args);
+    }
+
     send(data: string | ArrayBuffer | Buffer) {
       this.#socket.send(data as string | ArrayBuffer);
     }
