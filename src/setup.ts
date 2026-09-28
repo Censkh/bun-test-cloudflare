@@ -58,7 +58,11 @@ installCompatibilityPatch("worker-threads", installWorkerThreadsPatch);
 installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
 installCompatibilityPatch("wrangler-guess-worker-format", installWranglerGuessWorkerFormatPatch);
 if (
-  shouldInstallCompatibilityPatchGroup("miniflare-loopback", ["miniflare-loopback-launch", "miniflare-loopback-close"])
+  shouldInstallCompatibilityPatchGroup("miniflare-loopback", [
+    "miniflare-loopback-launch",
+    "miniflare-loopback-close",
+  ]) ||
+  shouldInstallCompatibilityPatchGroup("browser-rendering", ["browser-rendering-spawn"])
 ) {
   installMiniflareLoopbackPatch();
 }
