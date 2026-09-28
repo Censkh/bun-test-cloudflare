@@ -216,7 +216,9 @@ export const serveHarness = <const TWorkers extends Record<string, CloudflareWor
       try {
         await stopRequested;
       } finally {
-        await bunServer.stop(true);
+        // Bun 1.3 can leave this promise pending after an upgraded socket closes.
+        // stop() closes the listener synchronously, so the harness can release its lease.
+        void bunServer.stop(true);
       }
     });
 
