@@ -25,6 +25,24 @@ export default {
           header: request.headers.get("x-test"),
           body: await request.text(),
         });
+      case "/stream-transform": {
+        // Written through a TransformStream after the response is returned, like a page
+        // generated as it's sent
+        const encoder = new TextEncoder();
+        const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+        const writer = writable.getWriter();
+        (async () => {
+          await writer.write(encoder.encode("first;"));
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          await writer.write(encoder.encode("second"));
+          await writer.close();
+        })();
+        // Marked uncompressed: the runtime compresses for clients that accept it, and compressing
+        // holds small writes back until the body ends
+        return new Response(readable, {
+          headers: { "Content-Type": "text/plain", "Content-Encoding": "identity" },
+        });
+      }
       case "/stream": {
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({

@@ -76,6 +76,25 @@ describe("harness.serve", () => {
     }
   });
 
+  test("streams an uncompressed response body as it's written", async () => {
+    const server = await harness.serve({ worker: "BACKEND" });
+    try {
+      // A browser asks for compressed responses; the worker opts out, so nothing holds writes back
+      const response = await fetch(new URL("/stream-transform", server.url), {
+        headers: { "Accept-Encoding": "gzip, deflate, br" },
+      });
+      const reader = response.body!.getReader();
+      const startedAt = Date.now();
+      const first = await reader.read();
+      // The worker waits 750ms before writing the rest, so a held-back body arrives after that
+      expect(Date.now() - startedAt).toBeLessThan(500);
+      expect(new TextDecoder().decode(first.value)).toBe("first;");
+      await reader.cancel();
+    } finally {
+      await server.stop();
+    }
+  });
+
   test("routes handled by the fetch hook run in the harness run context", async () => {
     const server = await harness.serve({
       worker: "BACKEND",
