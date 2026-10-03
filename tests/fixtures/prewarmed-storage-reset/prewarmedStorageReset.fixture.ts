@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import "bun-test-cloudflare/setup";
 import { harness } from "./harness";
 
 const storageKey = "prewarmed-storage-reset";
