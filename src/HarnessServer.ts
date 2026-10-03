@@ -252,7 +252,7 @@ const handleExitSignalsGracefully = (stop: () => Promise<void>) => {
     for (const signal of EXIT_SIGNALS) {
       process.removeListener(signal, onSignal);
       for (const listener of originalListeners.get(signal) ?? []) {
-        if (!process.listeners(signal).includes(listener)) process.on(signal, listener);
+        if (!process.listeners(signal).includes(listener as any)) process.on(signal, listener as any);
       }
     }
   };
