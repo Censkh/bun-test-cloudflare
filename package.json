@@ -37,8 +37,8 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.14",
-    "@cloudflare/workers-types": "^5.20260916.1",
+    "@biomejs/biome": "^2.5.15",
+    "@cloudflare/workers-types": "5.20260918.1",
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.1",
     "@types/ws": "^8.18.1",
