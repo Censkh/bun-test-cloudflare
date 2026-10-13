@@ -239,7 +239,9 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
   const stderr = result.stderr.toString();
   const timedOut = options.processTimeoutMs !== undefined && durationMs >= options.processTimeoutMs;
   const exitCode = timedOut ? null : result.exitCode;
-  const signalCode = timedOut ? (result.signalCode ?? "SIGTERM") : (result.signalCode ?? null);
+  // Bun reports the signal as a name or, in newer versions, possibly as a number.
+  const rawSignalCode = timedOut ? (result.signalCode ?? "SIGTERM") : result.signalCode;
+  const signalCode = rawSignalCode == null ? null : String(rawSignalCode);
 
   if (shouldLogOutput || exitCode === null) {
     console.error(
