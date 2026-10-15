@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test";
-import { readdirSync, rmSync, unlinkSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
@@ -14,15 +14,6 @@ const sharedHarnessFixtureRoot = fixturePath(import.meta.dir, "shared-harness-cl
 const globalCachesFixture = bunFixtureTest(globalCachesFixtureRoot);
 const serviceBindingFixture = bunFixtureTest(serviceBindingFixtureRoot, { installMode: "full" });
 const sharedHarnessFixture = bunFixtureTest(sharedHarnessFixtureRoot);
-
-const removeFixtureBuildStatuses = (fixtureRoot: string) => {
-  const buildRoot = path.join(fixtureRoot, "node_modules/.btcf/worker-build");
-  for (const entry of readdirSync(buildRoot)) {
-    if (/\.build-\d+\.json$/.test(entry)) {
-      unlinkSync(path.join(buildRoot, entry));
-    }
-  }
-};
 
 const findNestedHarnessBuildDirectories = (fixtureRoot: string) => {
   const buildRoot = path.join(fixtureRoot, "node_modules/.btcf/worker-build");
@@ -67,7 +58,6 @@ describe("surfaced issue repro fixtures", () => {
       const firstResult = run({ timeoutMs: serviceBindingFixtureTimeoutMs });
       firstResult.expectStatusCode(0);
 
-      removeFixtureBuildStatuses(serviceBindingFixtureRoot);
       const secondResult = run({ timeoutMs: serviceBindingFixtureTimeoutMs });
       secondResult.expectStatusCode(0);
       expect(findNestedHarnessBuildDirectories(serviceBindingFixtureRoot)).toEqual([]);

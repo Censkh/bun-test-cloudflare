@@ -209,6 +209,16 @@ const { closePrewarmedServerOrchestrators, WARM_WORKERD_POOL_SIZE } = await impo
   "../src/PrewarmedServerOrchestrator"
 );
 
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const workerBuildPath = (root: string, workerName: string, file: string) =>
+  expect.stringMatching(
+    new RegExp(
+      `^${escapeRegExp(path.join(root, "node_modules/.btcf/worker-build", `run-${process.pid}`, workerName))}-[0-9a-f]{16}${escapeRegExp(path.sep + file)}$`,
+    ),
+  );
+const builtWorkerOutdir = (workerIndex = 0) =>
+  path.dirname((lastOptions as { workers: Array<{ config: { main: string } }> }).workers[workerIndex].config.main);
+
 type Equal<TActual, TExpected> =
   (<T>() => T extends TActual ? 1 : 2) extends <T>() => T extends TExpected ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
@@ -240,7 +250,7 @@ test("passes worker configs to Wrangler while preserving typed worker keys", asy
             "process.env.NODE_ENV": "'test'",
           },
           find_additional_modules: true,
-          main: path.join(testRoot, "node_modules/.btcf/worker-build/backend-worker/worker.js"),
+          main: workerBuildPath(testRoot, "backend-worker", "worker.js"),
           no_bundle: true,
           rules: [],
         }),
@@ -251,7 +261,7 @@ test("passes worker configs to Wrangler while preserving typed worker keys", asy
             "process.env.NODE_ENV": "'test'",
           },
           find_additional_modules: true,
-          main: path.join(testRoot, "node_modules/.btcf/worker-build/cms-worker/worker.js"),
+          main: workerBuildPath(testRoot, "cms-worker", "worker.js"),
           no_bundle: true,
           rules: [],
         }),
@@ -261,8 +271,8 @@ test("passes worker configs to Wrangler while preserving typed worker keys", asy
   });
   const configPaths = spawnedCommands.slice(-2).map((command) => command[command.indexOf("--config") + 1]);
   expect(configPaths.toSorted()).toEqual([
-    path.join(testRoot, "node_modules/.btcf/worker-build/backend-worker/wrangler.json"),
-    path.join(testRoot, "node_modules/.btcf/worker-build/cms-worker/wrangler.json"),
+    path.join(builtWorkerOutdir(0), "wrangler.json"),
+    path.join(builtWorkerOutdir(1), "wrangler.json"),
   ]);
   for (const configPath of configPaths) {
     expect(JSON.parse(readFileSync(configPath, "utf8")).find_additional_modules).toBe(false);
@@ -306,7 +316,7 @@ test("prebuilds inline worker configs with the same test transform", async () =>
             "process.env.NODE_ENV": "'test'",
           },
           find_additional_modules: true,
-          main: path.join(testRoot, "node_modules/.btcf/worker-build/inline-backend/worker.js"),
+          main: workerBuildPath(testRoot, "inline-backend", "worker.js"),
           no_bundle: true,
           rules: [],
         }),
@@ -314,9 +324,7 @@ test("prebuilds inline worker configs with the same test transform", async () =>
     ],
   });
   expect(spawnedCommands.at(-1)).toEqual(expect.arrayContaining(["deploy", "--dry-run", "--config"]));
-  expect(spawnedCommands.at(-1)).toContain(
-    path.join(testRoot, "node_modules/.btcf/worker-build/inline-backend/wrangler.json"),
-  );
+  expect(spawnedCommands.at(-1)).toContain(path.join(builtWorkerOutdir(), "wrangler.json"));
   expect(spawnedWorkingDirectories.at(-1)).toBe(testRoot);
 });
 
@@ -395,24 +403,16 @@ test("copies explicit additional modules without recursively copying harness bui
   const moduleRoot = path.join(testRoot, "copy-additional-modules");
   const sourceModulePath = path.join(moduleRoot, "node_modules/payload/dist/uploads/isImage.js");
   const outsideModulePath = path.join(testRoot, "outside.wasm");
-  const staleOutdirModulePath = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms/stale.wasm");
-  const activeSlotWrapperPath = path.join(
-    moduleRoot,
-    "node_modules/.btcf/worker-build/copy-modules-cms/copy-modules-cms--btcf-slot-0.test.cache-bridge.js",
-  );
   const staleHarnessModulePath = path.join(
     moduleRoot,
     "node_modules/.btcf/worker-build/stale-worker/node_modules/payload/dist/uploads/stale.js",
   );
   mkdirSync(path.dirname(sourceModulePath), { recursive: true });
   mkdirSync(path.dirname(staleHarnessModulePath), { recursive: true });
-  mkdirSync(path.dirname(staleOutdirModulePath), { recursive: true });
   writeFileSync(path.join(moduleRoot, "package.json"), JSON.stringify({ private: true, workspaces: [] }));
   writeFileSync(sourceModulePath, "export const isImage = () => true;\n");
   writeFileSync(outsideModulePath, "outside");
   writeFileSync(staleHarnessModulePath, "export const stale = true;\n");
-  writeFileSync(staleOutdirModulePath, "stale");
-  writeFileSync(activeSlotWrapperPath, "export default {};\n");
 
   const harness = createCloudflareHarness({
     root: moduleRoot,
@@ -435,9 +435,8 @@ test("copies explicit additional modules without recursively copying harness bui
 
   await harness.run(() => {});
 
-  const outdir = path.join(moduleRoot, "node_modules/.btcf/worker-build/copy-modules-cms");
-  expect(existsSync(staleOutdirModulePath)).toBe(false);
-  expect(existsSync(activeSlotWrapperPath)).toBe(true);
+  const outdir = builtWorkerOutdir();
+  expect(path.join(outdir, "worker.js")).toEqual(workerBuildPath(moduleRoot, "copy-modules-cms", "worker.js"));
   expect(existsSync(path.join(outdir, "node_modules/payload/dist/uploads/isImage.js"))).toBe(true);
   expect(existsSync(path.join(outdir, "outside.wasm"))).toBe(false);
   expect(
@@ -486,9 +485,7 @@ test("inline prebuilt workers copy split modules relative to their entry point",
     },
   });
   await harness.run(() => {});
-  expect(readFileSync(path.join(root, "node_modules/.btcf/worker-build/prebuilt-cms/assets/locale.js"), "utf8")).toBe(
-    "export default 'en';\n",
-  );
+  expect(readFileSync(path.join(builtWorkerOutdir(), "assets/locale.js"), "utf8")).toBe("export default 'en';\n");
 });
 
 test("run starts the server, passes typed workers, and resets it before reuse", async () => {

@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestHarness, TestHarnessOptions, WorkerHandle } from "wrangler";
 import { unstable_readConfig } from "wrangler";
+import { copyAdditionalModules, getAdditionalModuleSourceRoots } from "./AdditionalModules";
 import {
   type CloudflareHarnessRunContext,
   getCloudflareHarnessRunContext,
@@ -35,6 +36,7 @@ import {
   WARM_WORKERD_POOL_SIZE,
 } from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator } from "./ServerOrchestrator";
+import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
 import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
 
@@ -145,13 +147,6 @@ const withDryRunBuildConfig = (config: Record<string, any>) => ({
   find_additional_modules: false,
 });
 
-const additionalModuleRuleTypes = new Set(["CommonJS", "Data", "ESModule", "Text"]);
-
-const sanitizeWorkerName = (workerName: string) => workerName.replace(/[^a-zA-Z0-9._-]/g, "-");
-
-const getWorkerBuildOutdir = (baseDirectory: string, workerName: string) =>
-  path.join(baseDirectory, "node_modules/.btcf/worker-build", sanitizeWorkerName(workerName));
-
 const getWranglerBinPath = () => {
   const wranglerPackageJsonPath = fileURLToPath(import.meta.resolve("wrangler/package.json"));
   const wranglerPackageJson = JSON.parse(readFileSync(wranglerPackageJsonPath, "utf8")) as {
@@ -169,8 +164,6 @@ const getWranglerPreloadArgs = () =>
 const sleepSync = (durationMs: number) => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs);
 };
-
-const isErrnoException = (error: unknown): error is NodeJS.ErrnoException => error instanceof Error && "code" in error;
 
 const getPositiveIntegerEnvironmentVariable = (name: string, fallback: number) => {
   const value = Number(process.env[name]);
@@ -196,15 +189,6 @@ const buildRetryDelayMs = getPositiveIntegerEnvironmentVariable("BUN_TEST_CLOUDF
 const getRemainingBuildTimeMs = (deadline: number) => Math.max(0, deadline - Date.now());
 const getBuildOperationTimeoutMs = (deadline: number) =>
   Math.min(buildOperationTimeoutMs, getRemainingBuildTimeMs(deadline));
-
-const isProcessAlive = (processId: number) => {
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (error) {
-    return isErrnoException(error) && error.code === "EPERM";
-  }
-};
 
 export const removeStaleBuildLock = (lockPath: string) => {
   try {
@@ -247,6 +231,7 @@ type WorkerBuildResult = {
 
 type WorkerBuildPlan = {
   additionalModuleSourceRoots: string[];
+  buildBaseDirectory: string;
   buildCwd: string;
   buildKey: string;
   config: Record<string, any>;
@@ -262,7 +247,7 @@ const getBunTestRunKey = () =>
     ? String(process.pid)
     : String(process.ppid);
 
-const getBuildStatusPath = (outdir: string) => `${outdir}.build-${getBunTestRunKey()}.json`;
+const getBuildStatusPath = (outdir: string) => `${outdir}.status.json`;
 
 const createBuildKey = (config: Record<string, any>, env: string | undefined, buildCwd: string) =>
   crypto.createHash("sha256").update(JSON.stringify({ buildCwd, config, env })).digest("hex");
@@ -402,133 +387,32 @@ const runWranglerDryRun = (
 
 const createWorkerBuildPlan = (
   workerName: string,
-  outdir: string,
+  buildBaseDirectory: string,
   buildCwd: string,
   testConfig: Record<string, any>,
   config: Record<string, any>,
   env: string | undefined,
   additionalModuleSourceRoots: string[],
-): WorkerBuildPlan => ({
-  additionalModuleSourceRoots,
-  buildCwd,
-  buildKey: createBuildKey(testConfig, env, buildCwd),
-  config,
-  env,
-  outdir,
-  statusPath: getBuildStatusPath(outdir),
-  testConfig,
-  workerName,
-});
-
-const isProjectBoundary = (directory: string) => {
-  if (existsSync(path.join(directory, ".git"))) return true;
-  try {
-    const packageJson = JSON.parse(readFileSync(path.join(directory, "package.json"), "utf8")) as {
-      workspaces?: unknown;
-    };
-    return packageJson.workspaces !== undefined;
-  } catch {
-    return false;
-  }
-};
-
-const findProjectBoundary = (directory: string) => {
-  let currentDirectory = path.resolve(directory);
-  while (true) {
-    if (isProjectBoundary(currentDirectory)) return currentDirectory;
-    const parentDirectory = path.dirname(currentDirectory);
-    if (parentDirectory === currentDirectory) return undefined;
-    currentDirectory = parentDirectory;
-  }
-};
-
-const getAncestorDirectories = (directory: string) => {
-  const directories: string[] = [];
-  let currentDirectory = path.resolve(directory);
-  const projectBoundary = findProjectBoundary(currentDirectory);
-
-  while (!directories.includes(currentDirectory)) {
-    directories.push(currentDirectory);
-    if (projectBoundary === undefined || currentDirectory === projectBoundary) {
-      break;
-    }
-    const parentDirectory = path.dirname(currentDirectory);
-    if (parentDirectory === currentDirectory) {
-      break;
-    }
-    currentDirectory = parentDirectory;
-  }
-
-  return directories;
-};
-
-const getAdditionalModuleSourceRoots = (...directories: Array<string | undefined>) =>
-  Array.from(
-    new Set(
-      directories.flatMap((directory) => (directory && existsSync(directory) ? getAncestorDirectories(directory) : [])),
-    ),
-  );
-
-const isAdditionalModuleRule = (rule: Record<string, any>) =>
-  additionalModuleRuleTypes.has(rule.type) &&
-  Array.isArray(rule.globs) &&
-  rule.globs.every((glob) => typeof glob === "string");
-
-const isHarnessInternalPath = (filePath: string) => filePath.split(path.sep).includes(".btcf");
-
-const copyAdditionalModules = (plan: WorkerBuildPlan) => {
-  const rules = Array.isArray(plan.config.rules) ? plan.config.rules.filter(isAdditionalModuleRule) : [];
-  const copiedRelativePaths = new Set<string>();
-  const resolvedOutdir = path.resolve(plan.outdir);
-
-  for (const rule of rules) {
-    for (const glob of rule.globs as string[]) {
-      if (path.isAbsolute(glob)) {
-        continue;
-      }
-
-      const matcher = new Bun.Glob(glob);
-      for (const sourceRoot of plan.additionalModuleSourceRoots) {
-        for (const relativePath of matcher.scanSync({ cwd: sourceRoot, dot: true, onlyFiles: true })) {
-          const sourcePath = path.resolve(sourceRoot, relativePath);
-          if (
-            isHarnessInternalPath(relativePath) ||
-            sourcePath === resolvedOutdir ||
-            sourcePath.startsWith(`${resolvedOutdir}${path.sep}`)
-          ) {
-            continue;
-          }
-          if (copiedRelativePaths.has(relativePath)) {
-            continue;
-          }
-
-          const destinationPath = path.join(plan.outdir, relativePath);
-          mkdirSync(path.dirname(destinationPath), { recursive: true });
-          copyFileSync(sourcePath, destinationPath);
-          copiedRelativePaths.add(relativePath);
-        }
-      }
-    }
-  }
-};
-
-const isolatedWorkerSlotModulePattern = /\.cache-(?:bridge|namespace)\.js$/;
-
-const cleanWorkerBuildOutput = (outdir: string) => {
-  if (!existsSync(outdir)) {
-    return;
-  }
-
-  for (const entry of readdirSync(outdir)) {
-    if (isolatedWorkerSlotModulePattern.test(entry)) {
-      continue;
-    }
-    rmSync(path.join(outdir, entry), { force: true, recursive: true });
-  }
+): WorkerBuildPlan => {
+  const buildKey = createBuildKey(testConfig, env, buildCwd);
+  const outdir = getWorkerBuildOutdir(buildBaseDirectory, getBunTestRunKey(), workerName, buildKey);
+  return {
+    additionalModuleSourceRoots,
+    buildBaseDirectory,
+    buildCwd,
+    buildKey,
+    config,
+    env,
+    outdir,
+    statusPath: getBuildStatusPath(outdir),
+    testConfig,
+    workerName,
+  };
 };
 
 const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   const deadline = Date.now() + buildInitializationTimeoutMs;
+  removeFinishedRunBuilds(plan.buildBaseDirectory, isProcessAlive);
   return withBuildLock(plan.outdir, deadline, () => {
     const existingStatus = readBuildStatus(plan.statusPath);
     if (existingStatus?.buildKey === plan.buildKey) {
@@ -540,14 +424,19 @@ const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
       }
     }
 
-    cleanWorkerBuildOutput(plan.outdir);
+    // Only leftovers from an earlier run with a reused process ID or a crashed build can be here.
+    rmSync(plan.outdir, { force: true, recursive: true });
     mkdirSync(plan.outdir, { recursive: true });
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
       const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
       runWranglerDryRun(testConfigPath, plan.outdir, plan.env, deadline, plan.buildCwd);
       const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
-      copyAdditionalModules(plan);
+      copyAdditionalModules({
+        outdir: plan.outdir,
+        rules: plan.config.rules,
+        sourceRoots: plan.additionalModuleSourceRoots,
+      });
       writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, builtMain, state: "success" });
       return { built: true, builtMain };
     } catch (error) {
@@ -594,11 +483,7 @@ const writeResolvedConfig = (outdir: string, config: Record<string, any>) => {
   return configPath;
 };
 
-const resolveInlineConfig = (
-  input: Extract<WorkerInput, { config: unknown }>,
-  root: string | undefined,
-  workerName: string,
-) => {
+const resolveInlineConfig = (input: Extract<WorkerInput, { config: unknown }>, root: string | undefined) => {
   const config = input.config as Record<string, any>;
   const resolvedMain =
     typeof config.main === "string" && !path.isAbsolute(config.main)
@@ -608,18 +493,14 @@ const resolveInlineConfig = (
     ...config,
     ...(resolvedMain ? { main: resolvedMain } : {}),
   };
-  const outdir = getWorkerBuildOutdir(path.resolve(root ?? process.cwd()), workerName);
-  const configPath = writeResolvedConfig(outdir, resolvedConfig);
-
   return {
     additionalModuleSourceRoots: getAdditionalModuleSourceRoots(
       typeof resolvedMain === "string" ? path.dirname(resolvedMain) : undefined,
       root ?? process.cwd(),
     ),
+    buildBaseDirectory: path.resolve(root ?? process.cwd()),
     buildCwd: path.resolve(root ?? process.cwd()),
     config: resolvedConfig,
-    configPath,
-    outdir,
   };
 };
 
@@ -642,7 +523,7 @@ const resolveConfigPaths = (config: Record<string, any>, configDirectory: string
   };
 };
 
-const resolveWorkerConfig = (input: WorkerInput, root: string | undefined, fallbackWorkerName: string) => {
+const resolveWorkerConfig = (input: WorkerInput, root: string | undefined) => {
   if ("configPath" in input) {
     const { configPath, env } = input;
     const resolvedConfigPath = resolveConfigPath(configPath, root);
@@ -658,14 +539,13 @@ const resolveWorkerConfig = (input: WorkerInput, root: string | undefined, fallb
         root,
         process.cwd(),
       ),
+      buildBaseDirectory: configDirectory,
       buildCwd: configDirectory,
       config,
-      configPath: resolvedConfigPath,
-      outdir: getWorkerBuildOutdir(path.dirname(resolvedConfigPath), config.name ?? fallbackWorkerName),
     };
   }
 
-  return resolveInlineConfig(input, root, (input.config as Record<string, any>).name ?? fallbackWorkerName);
+  return resolveInlineConfig(input, root);
 };
 
 const prepareWorkerInput = (
@@ -681,16 +561,16 @@ const prepareWorkerInput = (
   const env = "env" in input ? input.env : undefined;
   const {
     additionalModuleSourceRoots,
+    buildBaseDirectory,
     buildCwd,
     config: resolvedConfig,
-    outdir,
-  } = resolveWorkerConfig(input, root, worker.name ?? key);
+  } = resolveWorkerConfig(input, root);
   const config = resolvedConfig as Record<string, any>;
   const workerName = worker.name ?? config.name ?? key;
   const testConfig = withTestEnvironmentDefine(config);
   const buildPlan = createWorkerBuildPlan(
     workerName,
-    outdir,
+    buildBaseDirectory,
     buildCwd,
     testConfig,
     config,
@@ -715,11 +595,11 @@ const prepareWorkerInput = (
     input: {
       config: {
         ...testConfig,
-        base_dir: outdir,
+        base_dir: buildPlan.outdir,
         find_additional_modules: true,
         main: buildResult.builtMain,
         no_bundle: true,
-        rules: withDryRunModuleRules(config.rules, outdir),
+        rules: withDryRunModuleRules(config.rules, buildPlan.outdir),
       },
       ...(vars ? { vars } : {}),
       ...(secrets ? { secrets } : {}),
