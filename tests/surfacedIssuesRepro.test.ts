@@ -10,10 +10,12 @@ const sharedHarnessTestTimeoutMs = 45_000;
 const globalCachesFixtureRoot = fixturePath(import.meta.dir, "global-caches-outside-run-repro");
 const serviceBindingFixtureRoot = fixturePath(import.meta.dir, "service-binding-missing-module-repro");
 const sharedHarnessFixtureRoot = fixturePath(import.meta.dir, "shared-harness-closed-repro");
+const fetchResponseGcFixtureRoot = fixturePath(import.meta.dir, "fetch-response-gc");
 
 const globalCachesFixture = bunFixtureTest(globalCachesFixtureRoot);
 const serviceBindingFixture = bunFixtureTest(serviceBindingFixtureRoot, { installMode: "full" });
 const sharedHarnessFixture = bunFixtureTest(sharedHarnessFixtureRoot);
+const fetchResponseGcFixture = bunFixtureTest(fetchResponseGcFixtureRoot);
 
 const findNestedHarnessBuildDirectories = (fixtureRoot: string) => {
   const buildRoot = path.join(fixtureRoot, "node_modules/.btcf/worker-build");
@@ -72,6 +74,16 @@ describe("surfaced issue repro fixtures", () => {
         testArgs: ["--max-concurrency=1"],
         timeoutMs: sharedHarnessFixtureTimeoutMs,
       });
+
+      result.expectStatusCode(0);
+    },
+    sharedHarnessTestTimeoutMs,
+  );
+
+  fetchResponseGcFixture.test(
+    "Worker response bodies survive a garbage collection before they are read",
+    ({ run }) => {
+      const result = run({ timeoutMs: sharedHarnessFixtureTimeoutMs });
 
       result.expectStatusCode(0);
     },

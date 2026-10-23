@@ -12,6 +12,24 @@ const installMarkAsUncloneableFallback = () => {
   workerThreads.markAsUncloneable ??= () => {};
 };
 
+/**
+ * Miniflare's fetch() returns `new Response(response.body, response)` and drops undici's own
+ * Response. undici cancels a fetch Response's unread body once that object is garbage collected,
+ * so a collection before the caller reads the copy cancels the body it still holds ("Body is
+ * unusable: Body has already been read"). Keep each fetch Response alive as long as its body
+ * stream is: the copy holds the stream, and the stream holds the original through this map.
+ * Patched before the module copies below, which Miniflare then receives.
+ */
+const retainFetchResponses = (undici: { fetch: (...args: unknown[]) => Promise<Response> }) => {
+  const originalFetch = undici.fetch;
+  const retained = new WeakMap<object, Response>();
+  undici.fetch = async function fetch(this: unknown, ...args: unknown[]) {
+    const response = await originalFetch.apply(this, args);
+    if (response?.body) retained.set(response.body, response);
+    return response;
+  };
+};
+
 export const installUndiciPatch = () => {
   if (shouldInstallCompatibilityPatch("undici-mark-as-uncloneable")) {
     installMarkAsUncloneableFallback();
@@ -20,6 +38,9 @@ export const installUndiciPatch = () => {
   const undiciPackageJsonPath = require.resolve("undici/package.json");
   const undiciIndexPath = path.join(path.dirname(undiciPackageJsonPath), "index.js");
   const undici = require(undiciIndexPath);
+  if (shouldInstallCompatibilityPatch("undici-fetch-response-retention")) {
+    retainFetchResponses(undici);
+  }
 
   if (shouldInstallCompatibilityPatch("undici-commonjs-require")) {
     const originalRequire = Module.prototype.require;

@@ -52,6 +52,11 @@ export const COMPATABILITY_PATCHES = {
   "miniflare-web-globals": { id: "miniflare-web-globals", disabledFromVersion: null },
   "miniflare-request": { id: "miniflare-request", disabledFromVersion: null },
   "miniflare-response": { id: "miniflare-response", disabledFromVersion: null },
+  // Miniflare's own bug rather than Bun's, so it has no disable version (UndiciPatch.ts).
+  "undici-fetch-response-retention": {
+    id: "undici-fetch-response-retention",
+    disabledFromVersion: null,
+  },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },
