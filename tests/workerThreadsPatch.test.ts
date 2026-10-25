@@ -65,6 +65,16 @@ const afterListener = true;`;
   expect(patched).toContain("const afterListener = true;");
 });
 
+test("leaves an already patched synchronous fetch script unchanged", () => {
+  const script = `port.addEventListener("message", async (event) => {
+  headers["MF-Op-Sync"] = "true";
+});`;
+  const patched = patchSynchronousFetcherWorkerScript(script);
+
+  expect(patched).not.toBe(script);
+  expect(patchSynchronousFetcherWorkerScript(patched)).toBe(patched);
+});
+
 test("buffers out-of-order synchronous fetch responses by id", () => {
   if (!shouldInstallCompatibilityPatch("worker-threads-fifo")) {
     return;

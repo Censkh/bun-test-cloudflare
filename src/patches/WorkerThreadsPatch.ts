@@ -4,6 +4,7 @@ import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
 
 const synchronousFetcherMessageHandlerStart = `port.addEventListener("message", async (event) => {`;
 const synchronousFetcherRequiredCode = `headers["${"MF-Op-Sync"}"] = "true";`;
+const synchronousFetcherPatchedMarker = "// bun-test-cloudflare: synchronous fetcher patched\n";
 
 type WorkerThreadsPatchOptions = {
   fifo: boolean;
@@ -89,14 +90,20 @@ export const patchSynchronousFetcherWorkerScript = (
   },
 ) => {
   const startIndex = script.indexOf(synchronousFetcherMessageHandlerStart);
-  if (startIndex < 0 || !script.includes(synchronousFetcherRequiredCode)) {
+  // A script can reach the patched Worker already patched (for example by a caller that patched
+  // it first); patching twice would declare the bootstrap's bindings twice.
+  if (
+    startIndex < 0 ||
+    !script.includes(synchronousFetcherRequiredCode) ||
+    script.includes(synchronousFetcherPatchedMarker)
+  ) {
     return script;
   }
 
   // Preserve Miniflare's handler and its private wake-up protocol. Bun cannot
   // transfer its live response ReadableStream, so intercept only that message
   // and bridge its chunks through a MessagePort.
-  return `${script.slice(0, startIndex)}${getSynchronousFetcherPoolCloseBootstrap(options)}${getSynchronousFetcherStreamBridgeBootstrap(options)}${script.slice(startIndex)}`;
+  return `${script.slice(0, startIndex)}${synchronousFetcherPatchedMarker}${getSynchronousFetcherPoolCloseBootstrap(options)}${getSynchronousFetcherStreamBridgeBootstrap(options)}${script.slice(startIndex)}`;
 };
 
 export const installWorkerThreadsPatch = () => {
