@@ -242,7 +242,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       reusableIndex >= 0 ? reusableIndex : this.#available.findIndex((warmRun) => warmRun.status === "ready");
     const settledIndex =
       readyIndex >= 0 ? readyIndex : this.#available.findIndex((warmRun) => warmRun.status === "failed");
-    const index = settledIndex >= 0 ? settledIndex : 0;
+    const index = Math.max(settledIndex, 0);
     return this.#available.splice(index, 1)[0];
   }
 

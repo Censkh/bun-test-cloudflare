@@ -47,8 +47,11 @@ export const COMPATABILITY_PATCHES = {
   "undici-esm-module": { id: "undici-esm-module", disabledFromVersion: null },
   "websocket-module": { id: "websocket-module", disabledFromVersion: null },
   "websocket-global": { id: "websocket-global", disabledFromVersion: null },
+  // Bun >=1.4.4's own `ws` waits for the server to end the connection (WsCloseHandshakePatch.ts).
+  "ws-close-handshake": { id: "ws-close-handshake", disabledFromVersion: null },
   "worker-threads": { id: "worker-threads", disabledFromVersion: null },
   "worker-threads-stream-bridge": { id: "worker-threads-stream-bridge", disabledFromVersion: null },
+  "worker-threads-undici-pool-close": { id: "worker-threads-undici-pool-close", disabledFromVersion: null },
   "miniflare-web-globals": { id: "miniflare-web-globals", disabledFromVersion: null },
   "miniflare-request": { id: "miniflare-request", disabledFromVersion: null },
   "miniflare-response": { id: "miniflare-response", disabledFromVersion: null },
@@ -63,6 +66,8 @@ export const COMPATABILITY_PATCHES = {
   "wrangler-dev-env": { id: "wrangler-dev-env", disabledFromVersion: null },
   "wrangler-dev-env-capture": { id: "wrangler-dev-env-capture", disabledFromVersion: null },
   "wrangler-dev-env-force-local": { id: "wrangler-dev-env-force-local", disabledFromVersion: null },
+  // Wrangler's blanket Bun refusal, which the undici patch makes unnecessary (WranglerBunDetectionPatch.ts).
+  "wrangler-bun-detection": { id: "wrangler-bun-detection", disabledFromVersion: null },
 } as const satisfies Record<string, { id: string; disabledFromVersion: string | null }>;
 
 export type CompatibilityPatchName = (typeof COMPATABILITY_PATCHES)[keyof typeof COMPATABILITY_PATCHES]["id"];

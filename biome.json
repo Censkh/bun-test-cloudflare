@@ -9,7 +9,6 @@
   },
   "linter": {
     "enabled": true,
-
     "rules": {
       "preset": "recommended",
       "complexity": {
@@ -41,5 +40,13 @@
     "enabled": true,
     "clientKind": "git",
     "useIgnoreFile": true
+  },
+  "markdown": {
+    "formatter": {
+      "enabled": false
+    },
+    "linter": {
+      "enabled": false
+    }
   }
 }

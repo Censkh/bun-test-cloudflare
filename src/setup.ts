@@ -17,10 +17,12 @@ import { installWebStreamPatch } from "./patches/WebStreamPatch";
 import { installWebsocketPatch } from "./patches/WebsocketPatch";
 import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
 import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
+import { installWranglerBunDetectionPatch } from "./patches/WranglerBunDetectionPatch";
 import {
   installWranglerGuessWorkerFormatPatch,
   stopWranglerEsbuildService,
 } from "./patches/WranglerGuessWorkerFormatPatch";
+import { installWsCloseHandshakePatch } from "./patches/WsCloseHandshakePatch";
 
 const installCompatibilityPatch = (patchName: CompatibilityPatchName, install: () => void) => {
   if (shouldInstallCompatibilityPatch(patchName)) {
@@ -39,6 +41,10 @@ if (
   installWebStreamPatch();
 }
 installCompatibilityPatch("global-caches", installGlobalCachesBridge);
+// Miniflare loads `ws` when the patches below require it. The websocket patch replaces `ws` itself.
+if (!shouldInstallCompatibilityPatch("websocket")) {
+  installCompatibilityPatch("ws-close-handshake", installWsCloseHandshakePatch);
+}
 installCompatibilityPatch("child-process-extra-fd", installChildProcessExtraFdPatch);
 if (
   shouldInstallCompatibilityPatchGroup("workerd-child-process", [
@@ -76,6 +82,10 @@ if (
   ])
 ) {
   installCloudflareWorkersPatch();
+}
+// Loads Wrangler, so it must follow every module mock above.
+if (shouldInstallCompatibilityPatch("undici")) {
+  installCompatibilityPatch("wrangler-bun-detection", installWranglerBunDetectionPatch);
 }
 
 afterAll(async () => {

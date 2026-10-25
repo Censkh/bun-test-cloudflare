@@ -9,7 +9,20 @@ type WorkerThreadsPatchOptions = {
   fifo: boolean;
   streamBridge: boolean;
   noTimeouts: boolean;
+  poolClose: boolean;
 };
+
+// Bun answers a worker's require("undici") with its built-in stub, whose Pool has no close().
+// Miniflare retires its Pool with close() after each streamed response, so give the stub a no-op.
+const getSynchronousFetcherPoolCloseBootstrap = ({ poolClose }: WorkerThreadsPatchOptions) =>
+  poolClose
+    ? `
+if (typeof Pool === "function" && typeof Pool.prototype.close !== "function") {
+  Pool.prototype.close = function close() {
+    return Promise.resolve();
+  };
+}`
+    : "";
 
 const getSynchronousFetcherStreamBridgeBootstrap = ({ streamBridge }: WorkerThreadsPatchOptions) =>
   streamBridge
@@ -72,6 +85,7 @@ export const patchSynchronousFetcherWorkerScript = (
     fifo: true,
     streamBridge: true,
     noTimeouts: true,
+    poolClose: true,
   },
 ) => {
   const startIndex = script.indexOf(synchronousFetcherMessageHandlerStart);
@@ -82,7 +96,7 @@ export const patchSynchronousFetcherWorkerScript = (
   // Preserve Miniflare's handler and its private wake-up protocol. Bun cannot
   // transfer its live response ReadableStream, so intercept only that message
   // and bridge its chunks through a MessagePort.
-  return `${script.slice(0, startIndex)}${getSynchronousFetcherStreamBridgeBootstrap(options)}${script.slice(startIndex)}`;
+  return `${script.slice(0, startIndex)}${getSynchronousFetcherPoolCloseBootstrap(options)}${getSynchronousFetcherStreamBridgeBootstrap(options)}${script.slice(startIndex)}`;
 };
 
 export const installWorkerThreadsPatch = () => {
@@ -90,6 +104,7 @@ export const installWorkerThreadsPatch = () => {
     fifo: shouldInstallCompatibilityPatch("worker-threads-fifo"),
     streamBridge: shouldInstallCompatibilityPatch("worker-threads-stream-bridge"),
     noTimeouts: shouldInstallCompatibilityPatch("worker-threads-no-timeouts"),
+    poolClose: shouldInstallCompatibilityPatch("worker-threads-undici-pool-close"),
   };
   const workerThreads = require("node:worker_threads") as typeof WorkerThreads;
   type PortMessage = NonNullable<ReturnType<typeof workerThreads.receiveMessageOnPort>>;

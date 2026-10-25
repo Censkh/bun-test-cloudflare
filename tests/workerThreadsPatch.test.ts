@@ -92,3 +92,29 @@ test("buffers out-of-order synchronous fetch responses by id", () => {
     port2.close();
   }
 });
+
+test("lets Miniflare retire the synchronous fetch pool in a Bun worker", async () => {
+  const script = `
+const { parentPort } = require("worker_threads");
+const { Pool } = require("undici");
+const port = { addEventListener() {} };
+port.addEventListener("message", async (event) => {
+  headers["MF-Op-Sync"] = "true";
+});
+new Pool("http://localhost:1")
+  .close()
+  .then(() => parentPort.postMessage("closed"), (error) => parentPort.postMessage(String(error)));`;
+  const { Worker } = require("node:worker_threads") as typeof import("node:worker_threads");
+  const worker = new Worker(patchSynchronousFetcherWorkerScript(script), { eval: true });
+
+  try {
+    const outcome = await new Promise((resolve, reject) => {
+      worker.once("message", resolve);
+      worker.once("error", (error) => resolve(String(error)));
+      setTimeout(() => reject(new Error("worker did not report")), 5_000);
+    });
+    expect(outcome).toBe("closed");
+  } finally {
+    await worker.terminate();
+  }
+});

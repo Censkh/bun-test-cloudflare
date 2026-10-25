@@ -23,6 +23,10 @@ bun add -d bun-test-cloudflare
 
 `bun-test-cloudflare` requires `wrangler >= 4.104.0`.
 
+Wrangler 4.151.3 and later refuse to dispatch requests under Bun, because Bun's own `fetch()` ignores the undici dispatcher Miniflare uses. The setup gives Miniflare the real undici package, so it also turns that check off (the `wrangler-bun-detection` patch). This loads Wrangler while the preload runs.
+
+From Bun 1.4.4, Bun's own `ws` emits `close` only once the server ends the connection, and workerd keeps it open for about ten seconds after a Worker closes a WebSocket. The `ws-close-handshake` patch drops the connection once both close frames have been exchanged, so a Worker's close reaches the test straight away.
+
 ## Configure Bun
 
 Preload the setup before app-specific test setup:
