@@ -15,6 +15,16 @@ const getInlineConfig = (input: WorkerInput) => {
   return input.config as Record<string, any>;
 };
 
+const SHARED_SLOT_BINDINGS = new Set([
+  "analytics_engine",
+  "browser",
+  "hyperdrive",
+  "images",
+  "json",
+  "plain_text",
+  "send_email",
+]);
+
 export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: string }, workerNames: Set<string>) => {
   if (binding.type === "d1") return typeof binding.database_id === "string";
   if (binding.type === "kv_namespace") return typeof binding.id === "string";
@@ -29,7 +39,12 @@ export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: 
   if (binding.type === "service") {
     return typeof binding.service === "string" && workerNames.has(binding.service);
   }
-  return binding.type === "images" || binding.type === "json" || binding.type === "plain_text";
+  if (binding.type === "queue") return typeof binding.queue_name === "string";
+  if (binding.type === "ratelimit") return typeof binding.namespace_id === "string";
+  // Shared by every slot, as they are by every generation: Hyperdrive reaches an outside database,
+  // Browser Rendering a local browser whose sessions each reset closes, and sent email and Analytics
+  // Engine writes keep no state a Worker can read back.
+  return SHARED_SLOT_BINDINGS.has(binding.type);
 };
 
 export const canUseIsolatedWorkerSlots = (workers: Array<{ input: WorkerInput; name: string }>) => {
@@ -247,6 +262,29 @@ const createSlotInput = (
         ...binding,
         ...appendSlotProperty(binding, "bucket_name", slot),
         ...appendSlotProperty(binding, "preview_bucket_name", slot),
+      })),
+      queues: config.queues
+        ? {
+            ...config.queues,
+            ...(config.queues.producers && {
+              producers: config.queues.producers.map((binding: Record<string, any>) => ({
+                ...binding,
+                ...appendSlotProperty(binding, "queue", slot),
+              })),
+            }),
+            ...(config.queues.consumers && {
+              consumers: config.queues.consumers.map((binding: Record<string, any>) => ({
+                ...binding,
+                ...appendSlotProperty(binding, "queue", slot),
+                ...appendSlotProperty(binding, "dead_letter_queue", slot),
+              })),
+            }),
+          }
+        : undefined,
+      // Rate limit counters live per namespace, so each slot counts its own requests.
+      ratelimits: config.ratelimits?.map((binding: Record<string, any>) => ({
+        ...binding,
+        namespace_id: `${binding.namespace_id}${slot}`,
       })),
       rules: [getSlotModuleRule(config.main, cacheNamespaceModule), ...(config.rules ?? [])],
       services: config.services?.map((binding: Record<string, any>) => ({

@@ -21,6 +21,21 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
   ).toBeTrue();
 });
 
+test("isolated Worker slots accept queues, rate limits and bindings every slot can share", () => {
+  expect(
+    canUseIsolatedWorkerSlots([
+      workerInput({
+        analytics_engine_datasets: [{ binding: "ANALYTICS", dataset: "events" }],
+        browser: { binding: "BROWSER" },
+        hyperdrive: [{ binding: "DATABASE", id: "hyperdrive", localConnectionString: "postgres://localhost/db" }],
+        queues: { producers: [{ binding: "JOBS", queue: "jobs" }] },
+        ratelimits: [{ name: "LIMITER", namespace_id: "1001", simple: { limit: 5, period: 60 } }],
+        send_email: [{ name: "EMAIL" }],
+      }),
+    ]),
+  ).toBeTrue();
+});
+
 test("isolated Worker slots reject unsupported and unidentified storage bindings", () => {
   expect(
     canUseIsolatedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
@@ -118,7 +133,12 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
           kv_namespaces: [{ binding: "KV", id: "namespace" }],
           main,
           name: "worker",
+          queues: {
+            consumers: [{ dead_letter_queue: "jobs-failed", queue: "jobs" }],
+            producers: [{ binding: "JOBS", queue: "jobs" }],
+          },
           r2_buckets: [{ binding: "BUCKET", bucket_name: "bucket" }],
+          ratelimits: [{ name: "LIMITER", namespace_id: "1001", simple: { limit: 5, period: 60 } }],
           rules: [{ globs: ["**/*.wasm"], type: "CompiledWasm" }],
         }),
       ],
@@ -132,6 +152,12 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
     expect(secondConfig.kv_namespaces[0].id).toBe("namespace--btcf-slot-1");
     expect(firstConfig.d1_databases[0].database_id).toBe("database--btcf-slot-0");
     expect(secondConfig.r2_buckets[0].bucket_name).toBe("bucket--btcf-slot-1");
+    expect(secondConfig.queues.producers[0].queue).toBe("jobs--btcf-slot-1");
+    expect(secondConfig.queues.consumers[0]).toEqual({
+      dead_letter_queue: "jobs-failed--btcf-slot-1",
+      queue: "jobs--btcf-slot-1",
+    });
+    expect(firstConfig.ratelimits[0].namespace_id).not.toBe(secondConfig.ratelimits[0].namespace_id);
     expect(fs.readFileSync(firstConfig.main, "utf8")).toContain("cache-namespace.js");
     expect(firstConfig.rules[0]).toEqual({
       fallthrough: true,
