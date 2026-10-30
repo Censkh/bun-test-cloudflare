@@ -75,7 +75,7 @@ const convertMockBindings = (config: Record<string, any>) => {
       EXTERNAL: { service: config.services[0].service, type: "service" },
     };
   }
-  return { UNSUPPORTED: { type: "browser" } };
+  return { UNSUPPORTED: { type: "ai" } };
 };
 
 const wranglerMock = {

@@ -97,7 +97,22 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
           .map((binding) => binding.type),
       ),
     ].sort(),
-  ).toEqual(["d1", "durable_object_namespace", "images", "json", "kv_namespace", "plain_text", "r2_bucket", "service"]);
+  ).toEqual([
+    "analytics_engine",
+    "browser",
+    "d1",
+    "durable_object_namespace",
+    "hyperdrive",
+    "images",
+    "json",
+    "kv_namespace",
+    "plain_text",
+    "queue",
+    "r2_bucket",
+    "ratelimit",
+    "send_email",
+    "service",
+  ]);
   expect(
     canUseIsolatedWorkerSlots([
       {
