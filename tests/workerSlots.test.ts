@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "../src/WorkerSlots";
+import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots, isSupportedSlotBinding } from "../src/WorkerSlots";
 
 const workerInput = (config: Record<string, unknown>) => ({ input: { config } as any, name: "worker" });
 
@@ -22,18 +22,21 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
 });
 
 test("isolated Worker slots accept queues, rate limits and bindings every slot can share", () => {
-  expect(
-    canUseIsolatedWorkerSlots([
-      workerInput({
-        analytics_engine_datasets: [{ binding: "ANALYTICS", dataset: "events" }],
-        browser: { binding: "BROWSER" },
-        hyperdrive: [{ binding: "DATABASE", id: "hyperdrive", localConnectionString: "postgres://localhost/db" }],
-        queues: { producers: [{ binding: "JOBS", queue: "jobs" }] },
-        ratelimits: [{ name: "LIMITER", namespace_id: "1001", simple: { limit: 5, period: 60 } }],
-        send_email: [{ name: "EMAIL" }],
-      }),
-    ]),
-  ).toBeTrue();
+  // Bindings as Wrangler converts them; checked directly so a mocked Wrangler elsewhere in the run can't
+  // change the result.
+  const workerNames = new Set(["worker"]);
+  for (const binding of [
+    { dataset: "events", type: "analytics_engine" },
+    { type: "browser" },
+    { id: "hyperdrive", localConnectionString: "postgres://localhost/db", type: "hyperdrive" },
+    { queue: "jobs", queue_name: "jobs", type: "queue" },
+    { namespace_id: "1001", simple: { limit: 5, period: 60 }, type: "ratelimit" },
+    { type: "send_email" },
+  ]) {
+    expect({ binding, supported: isSupportedSlotBinding(binding, workerNames) }).toEqual({ binding, supported: true });
+  }
+  expect(isSupportedSlotBinding({ type: "queue" }, workerNames)).toBeFalse();
+  expect(isSupportedSlotBinding({ type: "ratelimit" }, workerNames)).toBeFalse();
 });
 
 test("isolated Worker slots reject unsupported and unidentified storage bindings", () => {
