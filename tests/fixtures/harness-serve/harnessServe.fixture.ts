@@ -142,6 +142,24 @@ describe("harness.serve", () => {
     }
   });
 
+  test("answers a request that takes longer than Bun's idle timeout", async () => {
+    const server = await harness.serve({
+      worker: "BACKEND",
+      fetch: async (request) => {
+        if (new URL(request.url).pathname !== "/__slow") return;
+        await Bun.sleep(12_000);
+        return new Response("slow");
+      },
+    });
+    try {
+      const response = await fetch(new URL("/__slow", server.url));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("slow");
+    } finally {
+      await server.stop();
+    }
+  }, 30_000);
+
   test("proxies WebSocket connections both ways", async () => {
     const server = await harness.serve({ worker: "BACKEND" });
     try {

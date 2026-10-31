@@ -137,6 +137,9 @@ export const serveHarness = <const TWorkers extends Record<string, CloudflareWor
       const bunServer = Bun.serve<BridgedSocketData>({
         port: options.port ?? 0,
         hostname: options.hostname ?? "127.0.0.1",
+        // Bun drops a connection after 10 seconds without traffic, even mid-request; a worker
+        // answering slowly (a cold start, a loaded machine) must still get its response through
+        idleTimeout: 0,
         // A failing request must not end the run that keeps the server alive
         error: (error) =>
           new NativeResponse(error?.stack ?? String(error), {
