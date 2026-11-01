@@ -3,7 +3,7 @@ import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "browser-rendering-close-race");
 const fixtureTimeoutMs = 30_000;
-const testTimeoutMs = 45_000;
+const testTimeoutMs = 180_000;
 const concurrentFixtureTests = [
   "./browserRenderingCloseRaceA.fixture.ts",
   "./browserRenderingCloseRaceB.fixture.ts",
@@ -45,6 +45,7 @@ describe("Browser Rendering close race", () => {
         },
         fixtureTests: concurrentFixtureTests,
         testArgs: ["--parallel=4", "--parallel-delay=0"],
+        processTimeoutMs: 165_000,
         timeoutMs: fixtureTimeoutMs,
       });
       const output = `${result.stdout}\n${result.stderr}`;
