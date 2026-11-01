@@ -116,6 +116,49 @@ test("prewarmed server acquire skips stuck warm runs", async () => {
   }
 });
 
+test("prewarmed server acquire uses a slow warm start instead of closing it", async () => {
+  const originalTimeout = process.env.BUN_TEST_CLOUDFLARE_WARM_START_TIMEOUT_MS;
+  process.env.BUN_TEST_CLOUDFLARE_WARM_START_TIMEOUT_MS = "20";
+  const events: string[] = [];
+  let createdRuns = 0;
+  const runs: unknown[] = [];
+  const orchestrator = new PrewarmedServerOrchestrator<any>(() => {
+    const runId = createdRuns++;
+    const run = {
+      assertUsable: async () => {},
+      close: async () => {
+        events.push(`closed:${runId}`);
+      },
+      flushLogs: () => {},
+      resetForReuse: async () => {},
+      start: async () => {
+        // The first start outlasts the timeout but still finishes before its replacement.
+        await new Promise((resolve) => setTimeout(resolve, runId === 0 ? 40 : 200));
+        events.push(`started:${runId}`);
+      },
+    };
+    runs.push(run);
+    return run as any;
+  });
+
+  try {
+    const lease = await orchestrator.acquire();
+    expect(lease.run).toBe(runs[0] as any);
+    expect(events).toEqual(["started:0"]);
+    await lease.release();
+  } finally {
+    await orchestrator.close();
+    if (originalTimeout === undefined) {
+      delete process.env.BUN_TEST_CLOUDFLARE_WARM_START_TIMEOUT_MS;
+    } else {
+      process.env.BUN_TEST_CLOUDFLARE_WARM_START_TIMEOUT_MS = originalTimeout;
+    }
+  }
+
+  // The replacement it raced is closed only once its own start has settled.
+  expect(events.indexOf("started:1")).toBeLessThan(events.indexOf("closed:1"));
+});
+
 test("prewarmed server resets returned runs in the background", async () => {
   const events: string[] = [];
   let createdRuns = 0;

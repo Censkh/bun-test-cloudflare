@@ -572,6 +572,7 @@ test("run executes events.beforeRun inside the async run context", async () => {
 });
 
 test("parallel run calls use independent servers", async () => {
+  const serversBefore = createdServers.length;
   const harness = createCloudflareHarness({
     prewarmedWorkerdPoolSize: 2,
     workers: {
@@ -587,7 +588,6 @@ test("parallel run calls use independent servers", async () => {
     secondRunStarted = resolve;
   });
 
-  const serversBefore = createdServers.length;
   let firstServer!: FakeServer;
   let secondServer!: FakeServer;
   const firstRun = harness.run(async (_workers, server) => {
@@ -604,7 +604,8 @@ test("parallel run calls use independent servers", async () => {
   await firstRun;
 
   try {
-    expect(createdServers.length - serversBefore).toBe(0);
+    // The pool of two serves both runs.
+    expect(createdServers.length - serversBefore).toBe(2);
     expect(firstServer).not.toBe(secondServer);
     expect(firstServer.listenCalls).toBe(1);
     expect(firstServer.updateCalls).toBe(0);
@@ -619,23 +620,23 @@ test("parallel run calls use independent servers", async () => {
   expect(secondServer.closeCalls).toBe(0);
 });
 
-test("prewarms the configured server pool and refills it after a lease is released", async () => {
+test("starts no server until the first run, then keeps the pool warm after a lease is released", async () => {
   const serversBefore = createdServers.length;
   const harness = createCloudflareHarness({
     workers: {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
     },
   });
-  const initialWarmServers = createdServers.slice(serversBefore);
 
-  expect(initialWarmServers).toHaveLength(WARM_WORKERD_POOL_SIZE);
-  expect(initialWarmServers.every((server) => server.listenCalls === 1)).toBe(true);
+  // A harness that is created but never run (one a test file imports along with helpers) costs no
+  // workerd.
+  expect(createdServers.slice(serversBefore)).toHaveLength(0);
 
   let leasedServer!: FakeServer;
   await harness.run((_workers, server) => {
     leasedServer = server as unknown as FakeServer;
-    expect(initialWarmServers).toContain(leasedServer);
     expect(createdServers.slice(serversBefore)).toHaveLength(WARM_WORKERD_POOL_SIZE);
+    expect(createdServers.slice(serversBefore)).toContain(leasedServer);
   });
 
   const harnessServers = createdServers.slice(serversBefore);
@@ -657,14 +658,14 @@ test("supports a configured prewarmed workerd pool size", async () => {
     },
   });
 
-  expect(createdServers.slice(serversBefore)).toHaveLength(2);
+  expect(createdServers.slice(serversBefore)).toHaveLength(0);
   await harness.run(() => {});
   expect(createdServers.slice(serversBefore)).toHaveLength(2);
 });
 
-test("uses four isolated slots and one prewarmed workerd by default when eligible", () => {
+test("uses four isolated slots and one prewarmed workerd by default when eligible", async () => {
   const serversBefore = createdServers.length;
-  createCloudflareHarness({
+  const harness = createCloudflareHarness({
     workers: {
       BACKEND: {
         configPath: "./wrangler.eligible.toml",
@@ -672,6 +673,7 @@ test("uses four isolated slots and one prewarmed workerd by default when eligibl
       },
     },
   });
+  await harness.run(() => {});
 
   expect(createdServers.slice(serversBefore)).toHaveLength(1);
   expect((lastOptions as { workers: unknown[] }).workers).toHaveLength(4);
@@ -684,6 +686,8 @@ test("discards stale prewarmed servers before leasing them", async () => {
       BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
     },
   });
+  // The first run starts the pool; the server it returns to the pool goes stale.
+  await harness.run(() => {});
   const initialWarmServers = createdServers.slice(serversBefore);
   initialWarmServers[0].getEnvError = new Error("poisoned warm server");
 

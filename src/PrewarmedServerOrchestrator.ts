@@ -50,17 +50,18 @@ const getWarmStartTimeoutMs = () => {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_WARM_WORKERD_START_TIMEOUT_MS;
 };
 
-const waitForWarmStart = async <TWorkers extends Record<string, any>>(warmRun: WarmHarnessRun<TWorkers>) => {
+const waitForWarmStart = async <TWorkers extends Record<string, any>>(
+  warmRun: Pick<WarmHarnessRun<TWorkers>, "started">,
+  timeoutMs = getWarmStartTimeoutMs(),
+) => {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       warmRun.started,
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
-          reject(
-            new Error(`Timed out waiting for prewarmed Cloudflare server startup after ${getWarmStartTimeoutMs()}ms`),
-          );
-        }, getWarmStartTimeoutMs());
+          reject(new Error(`Timed out waiting for prewarmed Cloudflare server startup after ${timeoutMs}ms`));
+        }, timeoutMs);
         timeout.unref?.();
       }),
     ]);
@@ -96,6 +97,8 @@ export const closePrewarmedServerOrchestrators = async () => {
 export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
   readonly #available: Array<WarmHarnessRun<TWorkers>> = [];
   readonly #inUse = new Set<HarnessRun<TWorkers>>();
+  // Runs that lost a start race, closing once their own start settles
+  readonly #closing = new Set<Promise<void>>();
   #closed = false;
 
   constructor(
@@ -115,10 +118,9 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       const warmRun = this.#takeAvailableRun() ?? this.#createStartedRun();
 
       try {
-        run = await waitForWarmStart(warmRun);
+        run = await this.#waitForStartOrReplacement(warmRun);
       } catch (error) {
         logDiscardedWarmRun(warmRun.phase, error);
-        await warmRun.run.close().catch(() => {});
         discardedRuns += 1;
         if (discardedRuns > this.poolSize) {
           throw error;
@@ -179,8 +181,50 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     await Promise.allSettled([
       ...availableRuns.map((warmRun) => this.#closeWarmRun(warmRun)),
       ...Array.from(this.#inUse, (run) => run.close()),
+      ...this.#closing,
     ]);
     this.#inUse.clear();
+  }
+
+  /**
+   * Waits for a run to start. One still starting after the timeout may be stuck, or only slow on a
+   * busy machine, so a fresh start races it and the first to finish is used. Closing the slow one
+   * instead would throw its progress away (and can leave workerd running) while the replacement
+   * competes with it for the same machine.
+   */
+  async #waitForStartOrReplacement(warmRun: WarmHarnessRun<TWorkers>) {
+    try {
+      return await waitForWarmStart(warmRun);
+    } catch (error) {
+      if (warmRun.status === "failed") throw error;
+      logDiscardedWarmRun(warmRun.phase, error);
+      const replacement = this.#createStartedRun();
+      const started = (candidate: WarmHarnessRun<TWorkers>, other: WarmHarnessRun<TWorkers>) =>
+        candidate.started.then((run) => ({ run, other }));
+      const raced = {
+        started: Promise.any([started(warmRun, replacement), started(replacement, warmRun)]).then(
+          ({ run, other }) => {
+            this.#closeInBackground(other);
+            return run;
+          },
+        ),
+      };
+      try {
+        // The machine is evidently slow, so the race gets twice the usual time.
+        return await waitForWarmStart(raced, getWarmStartTimeoutMs() * 2);
+      } catch (raceError) {
+        this.#closeInBackground(warmRun);
+        this.#closeInBackground(replacement);
+        throw raceError;
+      }
+    }
+  }
+
+  #closeInBackground(warmRun: WarmHarnessRun<TWorkers>) {
+    const closing = this.#closeWarmRun(warmRun)
+      .catch(() => {})
+      .finally(() => this.#closing.delete(closing));
+    this.#closing.add(closing);
   }
 
   #assertOpen() {

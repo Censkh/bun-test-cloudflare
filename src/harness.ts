@@ -35,7 +35,7 @@ import {
   PrewarmedServerOrchestrator,
   WARM_WORKERD_POOL_SIZE,
 } from "./PrewarmedServerOrchestrator";
-import { InlineServerOrchestrator } from "./ServerOrchestrator";
+import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrchestrator";
 import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
 import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
@@ -658,10 +658,14 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
       workerEntries,
       workerSlotNames: workerSlots?.workerNames,
     });
-  const orchestrator =
-    process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
-      ? new InlineServerOrchestrator(createRun)
-      : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize);
+  // The Workers are built now, so building never counts against a test's timeout, but workerd starts
+  // on the first run: a module can create a harness that a test file importing it never runs.
+  let orchestrator: ServerOrchestrator<TWorkers> | undefined;
+  const getOrchestrator = () =>
+    (orchestrator ??=
+      process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
+        ? new InlineServerOrchestrator(createRun)
+        : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize));
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
 
   const harness: CloudflareHarness<TWorkers> = {
@@ -671,7 +675,7 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     async run(callback) {
       const runStartedAt = performance.now();
       const acquireStartedAt = performance.now();
-      const lease = await orchestrator.acquire();
+      const lease = await getOrchestrator().acquire();
       logTiming("harness acquire", acquireStartedAt);
       try {
         return await lease.run.execute(callback, { closeAfterExecute: !keepsServerAlive });
