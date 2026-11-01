@@ -158,6 +158,26 @@ const runFakeWranglerBuild = (command: string[]) => {
 
 Bun.spawnSync = ((options: { cmd: string[]; cwd?: string; timeout?: number }) => {
   if (Array.isArray(options)) return originalSpawnSync(options);
+  if (options.cmd[1]?.endsWith("WorkerBuildProcess.ts")) {
+    const plans = JSON.parse(readFileSync(options.cmd[2]!, "utf8")) as Array<{
+      buildKey: string;
+      outdir: string;
+      testConfig: Record<string, unknown>;
+    }>;
+    const results = plans.map((plan) => {
+      mkdirSync(plan.outdir, { recursive: true });
+      writeFileSync(
+        path.join(plan.outdir, "wrangler.json"),
+        JSON.stringify({ ...plan.testConfig, find_additional_modules: false }),
+      );
+      const builtMain = path.join(plan.outdir, "worker.js");
+      writeFileSync(builtMain, "export default {};");
+      spawnedCommands.push(["wrangler", "deploy", "--dry-run", "--config", path.join(plan.outdir, "wrangler.json")]);
+      return { result: { built: true, builtMain } };
+    });
+    writeFileSync(options.cmd[3]!, JSON.stringify(results));
+    return { exitCode: 0, stderr: Buffer.from(""), stdout: Buffer.from("") };
+  }
   spawnedCommands.push(options.cmd);
   spawnedWorkingDirectories.push(options.cwd);
   spawnedTimeouts.push(options.timeout);

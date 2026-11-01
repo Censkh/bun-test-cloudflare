@@ -86,8 +86,9 @@ The optional `bindings` token is type-only metadata for `worker.getEnv()` and is
 
 When a worker uses `configPath`, `bun-test-cloudflare` reads that Wrangler config, injects
 `define["process.env.NODE_ENV"] = "'test'"`, and runs `wrangler deploy --dry-run --outdir`
-once for that harness. Build output is written to
-`node_modules/.btcf/worker-build/<worker-name>/worker.js`. Test runs then use that script
+once per matching Worker configuration and Bun test run. Independent Worker builds run concurrently;
+if any Worker has a custom build command, builds run in their configured order. Build output is
+isolated under `node_modules/.btcf/worker-build/run-<id>/`. Test runs then use that script
 with `no_bundle = true`, so Wrangler does not rerun its esbuild bundle step for every
 `run()`.
 

@@ -202,12 +202,10 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       const started = (candidate: WarmHarnessRun<TWorkers>, other: WarmHarnessRun<TWorkers>) =>
         candidate.started.then((run) => ({ run, other }));
       const raced = {
-        started: Promise.any([started(warmRun, replacement), started(replacement, warmRun)]).then(
-          ({ run, other }) => {
-            this.#closeInBackground(other);
-            return run;
-          },
-        ),
+        started: Promise.any([started(warmRun, replacement), started(replacement, warmRun)]).then(({ run, other }) => {
+          this.#closeInBackground(other);
+          return run;
+        }),
       };
       try {
         // The machine is evidently slow, so the race gets twice the usual time.

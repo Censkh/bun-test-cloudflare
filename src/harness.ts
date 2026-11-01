@@ -4,6 +4,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -11,6 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TestHarness, TestHarnessOptions, WorkerHandle } from "wrangler";
@@ -229,7 +231,7 @@ type WorkerBuildResult = {
   builtMain: string;
 };
 
-type WorkerBuildPlan = {
+export type WorkerBuildPlan = {
   additionalModuleSourceRoots: string[];
   buildBaseDirectory: string;
   buildCwd: string;
@@ -410,7 +412,7 @@ const createWorkerBuildPlan = (
   };
 };
 
-const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
+export const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   const deadline = Date.now() + buildInitializationTimeoutMs;
   removeFinishedRunBuilds(plan.buildBaseDirectory, isProcessAlive);
   return withBuildLock(plan.outdir, deadline, () => {
@@ -548,11 +550,7 @@ const resolveWorkerConfig = (input: WorkerInput, root: string | undefined) => {
   return resolveInlineConfig(input, root);
 };
 
-const prepareWorkerInput = (
-  key: string,
-  worker: CloudflareWorkerConfig,
-  root: string | undefined,
-): PreparedWorkerInput => {
+const planWorkerInput = (key: string, worker: CloudflareWorkerConfig, root: string | undefined) => {
   const start = performance.now();
   const { bindings: _bindings, name: _name, ...input } = worker;
 
@@ -577,7 +575,13 @@ const prepareWorkerInput = (
     env,
     additionalModuleSourceRoots,
   );
-  const buildResult = buildWorkerOnce(buildPlan);
+  return { start, vars, secrets, testConfig, workerName, buildPlan };
+};
+
+const prepareWorkerInput = (
+  { start, vars, secrets, testConfig, workerName, buildPlan }: ReturnType<typeof planWorkerInput>,
+  buildResult: WorkerBuildResult,
+): PreparedWorkerInput => {
   const browserConfig = (testConfig as Record<string, unknown>).browser;
   const browserBindingName =
     typeof browserConfig === "object" &&
@@ -599,13 +603,46 @@ const prepareWorkerInput = (
         find_additional_modules: true,
         main: buildResult.builtMain,
         no_bundle: true,
-        rules: withDryRunModuleRules(config.rules, buildPlan.outdir),
+        rules: withDryRunModuleRules(buildPlan.config.rules, buildPlan.outdir),
       },
       ...(vars ? { vars } : {}),
       ...(secrets ? { secrets } : {}),
     } as WorkerInput,
     name: workerName,
   };
+};
+
+const buildWorkers = (plans: WorkerBuildPlan[]): WorkerBuildResult[] => {
+  // Custom build commands can write to shared project files, so retain their original order.
+  if (plans.length < 2 || plans.some((plan) => plan.config.build?.command)) {
+    return plans.map(buildWorkerOnce);
+  }
+  const directory = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-builds-"));
+  try {
+    const inputPath = path.join(directory, "plans.json");
+    const outputPath = path.join(directory, "results.json");
+    writeFileSync(inputPath, JSON.stringify(plans), { mode: 0o600 });
+    const result = Bun.spawnSync({
+      cmd: [process.execPath, path.join(import.meta.dir, "WorkerBuildProcess.ts"), inputPath, outputPath],
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: buildInitializationTimeoutMs + 10_000,
+    });
+    if (result.exitCode !== 0 || result.signalCode) {
+      throw new Error(`Parallel Worker builds failed: ${result.stderr.toString()}`);
+    }
+    const results = JSON.parse(readFileSync(outputPath, "utf8")) as Array<
+      { result: WorkerBuildResult } | { errorMessage: string; errorStack?: string }
+    >;
+    return results.map((entry) => {
+      if ("result" in entry) return entry.result;
+      const error = new Error(entry.errorMessage);
+      if (entry.errorStack) error.stack = entry.errorStack;
+      throw error;
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 };
 
 export const createCloudflareHarness = <const TWorkers extends Record<string, CloudflareWorkerConfig>>(
@@ -628,9 +665,24 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     throw new TypeError("prewarmedWorkerdPoolSize must be a positive integer");
   }
   const workerEntries = Object.entries(workerConfigs) as Array<[keyof TWorkers, CloudflareWorkerConfig]>;
-  const preparedWorkers = workerEntries.map(([key, worker]) =>
-    prepareWorkerInput(String(key), worker, serverConfig.root),
-  );
+  const buildStartedAt = performance.now();
+  let workerPlans: ReturnType<typeof planWorkerInput>[] | undefined;
+  try {
+    workerPlans = workerEntries.map(([key, worker]) => planWorkerInput(String(key), worker, serverConfig.root));
+  } catch {
+    // A preceding custom build may create a later Worker's config or entrypoint.
+  }
+  const preparedWorkers =
+    !workerPlans || workerPlans.some((worker) => worker.buildPlan.config.build?.command)
+      ? workerEntries.map(([key, worker]) => {
+          const plan = planWorkerInput(String(key), worker, serverConfig.root);
+          return prepareWorkerInput(plan, buildWorkerOnce(plan.buildPlan));
+        })
+      : (() => {
+          const buildResults = buildWorkers(workerPlans.map((worker) => worker.buildPlan));
+          return workerPlans.map((worker, index) => prepareWorkerInput(worker, buildResults[index]!));
+        })();
+  logTiming("worker builds", buildStartedAt);
   const supportsIsolatedWorkerSlots =
     configuredIsolatedWorkerSlots === 1 ? false : canUseIsolatedWorkerSlots(preparedWorkers);
   const isolatedWorkerSlots =
