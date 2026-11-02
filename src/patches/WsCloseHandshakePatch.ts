@@ -41,7 +41,9 @@ export const endSocketAfterCloseHandshake = (ws: BunWs, closing: number, closed:
 };
 
 export const installWsCloseHandshakePatch = () => {
-  const BuiltinWs = require("ws") as WsConstructor;
+  const wsModuleExport = require("ws") as WsConstructor & { default?: WsConstructor };
+  // Older Bun exposes a mocked `ws` as a module namespace rather than its default constructor.
+  const BuiltinWs = wsModuleExport.default ?? wsModuleExport;
   const WebSocket = function WebSocket(...args: unknown[]) {
     const ws = new BuiltinWs(...args);
     endSocketAfterCloseHandshake(ws, BuiltinWs.CLOSING, BuiltinWs.CLOSED);
