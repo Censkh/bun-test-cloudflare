@@ -127,6 +127,26 @@ Eligible harnesses use four isolated slots by default. Each slot is a distinct W
 
 Use the `workers` handles, `server.fetch()`, or `server.getWorker()` supplied to `run()` so requests follow the active slot. A URL returned by `server.listen()` addresses the generation's first physical Worker and should not be used with slotted harnesses.
 
+### Sharing one slot across a suite
+
+Every `run()` leases a fresh slot, so a file of short tests waits for a new workerd generation every few tests. A suite whose tests keep their data apart (for example, each in a project of its own) can hold one slot instead:
+
+```ts
+let lease: Awaited<ReturnType<typeof harness.lease>>;
+beforeAll(async () => {
+  lease = await harness.lease();
+});
+afterAll(() => lease.release());
+
+test("uploads a PNG", async () => {
+  await lease.run(async (workers) => {
+    // Same Worker globals and storage as the lease's other runs.
+  });
+});
+```
+
+Runs in a lease never overlap. Each one waits for the background work it started and fails if a `waitUntil` promise it started rejected. After `release()`, the slot is reset like any other before it is used again. Keep `run()` for tests that need clean globals or storage.
+
 ## Serve A Worker Over HTTP
 
 `harness.serve()` exposes one worker on a local port for the length of a harness run, for tests that need a real HTTP server, such as browser tests:
