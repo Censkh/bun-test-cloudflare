@@ -118,12 +118,12 @@ const streamServerLogs = (server: TestHarness) => {
   const interval = setInterval(flush, 25);
 
   return {
+    // Each failure is reported once, so a shared lease fails only the run that caused it.
     assertNoWaitUntilFailures: () => {
       if (waitUntilFailures.length === 0) return;
 
-      throw new Error(
-        `Worker waitUntil promise rejection${waitUntilFailures.length === 1 ? "" : "s"}:\n${waitUntilFailures.join("\n")}`,
-      );
+      const failures = waitUntilFailures.splice(0);
+      throw new Error(`Worker waitUntil promise rejection${failures.length === 1 ? "" : "s"}:\n${failures.join("\n")}`);
     },
     flush,
     stop: () => clearInterval(interval),
@@ -316,19 +316,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       throw new Error("Cloudflare harness run is closed");
     }
 
-    await drainHarnessRun({
-      devEnvs: this.#capturedDevEnvs,
-      drainBrowserRendering: this.options.hasBrowserRendering,
-      platformProxyDispatches: this.#platformProxyDispatches,
-    });
-    await this.#closeActiveBrowserRenderingSessions();
-    if (this.options.hasBrowserRendering) {
-      await drainHarnessRun({
-        devEnvs: this.#capturedDevEnvs,
-        drainBrowserRendering: true,
-        platformProxyDispatches: this.#platformProxyDispatches,
-      });
-    }
+    await this.#settleBackgroundWork();
     this.#logStream.flush();
     if (this.canRotateWorkerSlotForReuse()) {
       const slotStartedAt = performance.now();
@@ -347,6 +335,38 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   flushLogs() {
     this.#logStream.flush();
     this.#logStream.assertNoWaitUntilFailures();
+  }
+
+  /**
+   * Ends one run of a shared lease without resetting the slot: waits for the background work it
+   * started (waitUntil tasks, platform proxy calls, Browser Rendering sessions), then reports its
+   * logs and any waitUntil failure, as a release does for a run of its own.
+   */
+  async settle() {
+    const startedAt = performance.now();
+    if (this.#closed) {
+      throw new Error("Cloudflare harness run is closed");
+    }
+
+    await this.#settleBackgroundWork();
+    this.flushLogs();
+    logTiming(`${this.#timingLabel} settle`, startedAt);
+  }
+
+  async #settleBackgroundWork() {
+    await drainHarnessRun({
+      devEnvs: this.#capturedDevEnvs,
+      drainBrowserRendering: this.options.hasBrowserRendering,
+      platformProxyDispatches: this.#platformProxyDispatches,
+    });
+    await this.#closeActiveBrowserRenderingSessions();
+    if (this.options.hasBrowserRendering) {
+      await drainHarnessRun({
+        devEnvs: this.#capturedDevEnvs,
+        drainBrowserRendering: true,
+        platformProxyDispatches: this.#platformProxyDispatches,
+      });
+    }
   }
 
   async close() {

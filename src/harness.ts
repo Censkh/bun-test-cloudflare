@@ -74,10 +74,28 @@ export type CloudflareHarnessConfig<TWorkers extends Record<string, CloudflareWo
   workers: TWorkers;
 };
 
+type CloudflareHarnessCallback<TWorkers extends Record<string, CloudflareWorkerConfig>, TResult> = (
+  workers: CloudflareWorkerMap<TWorkers>,
+  server: TestHarness,
+) => Promise<TResult> | TResult;
+
+/** One Worker slot held across several runs; see `CloudflareHarness.lease()`. */
+export type CloudflareHarnessLease<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
+  /** Runs the callback in the leased slot. Runs never overlap: each waits for the one before. */
+  run<TResult>(callback: CloudflareHarnessCallback<TWorkers, TResult>): Promise<TResult>;
+  /** Waits for the last run, then returns the slot, which is reset before anything else uses it. */
+  release(): Promise<void>;
+};
+
 export type CloudflareHarness<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
-  run<TResult>(
-    callback: (workers: CloudflareWorkerMap<TWorkers>, server: TestHarness) => Promise<TResult> | TResult,
-  ): Promise<TResult>;
+  run<TResult>(callback: CloudflareHarnessCallback<TWorkers, TResult>): Promise<TResult>;
+  /**
+   * Leases one Worker slot for several runs, for example from `beforeAll` to `afterAll`, instead
+   * of a fresh slot for each run. Runs in a lease share Worker globals and storage, so use it only
+   * for tests that keep their data apart (for example, each in a project of its own). Each run
+   * still waits for the background work it started and reports its waitUntil failures.
+   */
+  lease(): Promise<CloudflareHarnessLease<TWorkers>>;
   /** Exposes one worker over HTTP for the length of a run, e.g. as a backend for browser tests. */
   serve(options: CloudflareHarnessServeOptions<TWorkers>): Promise<CloudflareHarnessServer<TWorkers>>;
 };
@@ -723,6 +741,37 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   const harness: CloudflareHarness<TWorkers> = {
     serve(options) {
       return serveHarness(harness, options);
+    },
+    async lease() {
+      const acquireStartedAt = performance.now();
+      const lease = await getOrchestrator().acquire();
+      logTiming("harness lease acquire", acquireStartedAt);
+      let released = false;
+      let previous: Promise<unknown> = Promise.resolve();
+      return {
+        run(callback) {
+          if (released) {
+            return Promise.reject(new Error("Cloudflare harness lease is released"));
+          }
+          const result = previous.then(async () => {
+            const runStartedAt = performance.now();
+            try {
+              return await lease.run.execute(callback, { closeAfterExecute: false });
+            } finally {
+              await lease.run.settle();
+              logTiming("harness lease run", runStartedAt);
+            }
+          });
+          previous = result.catch(() => {});
+          return result;
+        },
+        async release() {
+          if (released) return;
+          released = true;
+          await previous;
+          await lease.release();
+        },
+      };
     },
     async run(callback) {
       const runStartedAt = performance.now();

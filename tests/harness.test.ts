@@ -806,6 +806,107 @@ test("run fails after cleanup when Worker waitUntil work rejects", async () => {
   expect(server.closeCalls).toBe(1);
 });
 
+test("a lease runs each callback on one server without resetting it, then resets it once released", async () => {
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml", name: "backend-worker" },
+    },
+  });
+
+  const lease = await harness.lease();
+  const leasedServers: FakeServer[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const result = await lease.run((workers, server) => {
+      leasedServers.push(server as unknown as FakeServer);
+      expect(getCloudflareHarnessRunContext().server).toBe(server);
+      expect(workers.BACKEND as unknown).toEqual({ name: "backend-worker" });
+      return index;
+    });
+    expect(result).toBe(index);
+  }
+  const [server] = leasedServers;
+  expect(leasedServers).toEqual([server!, server!, server!]);
+  expect(server!.resetCalls).toBe(0);
+
+  await lease.release();
+  await harness.run((_workers, nextServer) => {
+    expect(nextServer as unknown).toBe(server as unknown);
+  });
+  expect(server!.resetCalls).toBe(1);
+  expect(server!.closeCalls).toBe(0);
+});
+
+test("lease runs wait for the run before them", async () => {
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml" },
+    },
+  });
+  const lease = await harness.lease();
+  const events: string[] = [];
+  let finishFirst!: () => void;
+  const first = lease.run(async () => {
+    events.push("first:start");
+    await new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    events.push("first:end");
+  });
+  const second = lease.run(() => {
+    events.push("second");
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(events).toEqual(["first:start"]);
+  finishFirst();
+  await Promise.all([first, second]);
+  expect(events).toEqual(["first:start", "first:end", "second"]);
+  await lease.release();
+});
+
+test("a waitUntil failure fails only the lease run that caused it", async () => {
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml" },
+    },
+  });
+  const originalConsoleError = console.error;
+  console.error = () => {};
+
+  const lease = await harness.lease();
+  try {
+    await expect(
+      lease.run((_workers, server) => {
+        (server as unknown as FakeServer).logs = [
+          { level: "error", message: "waitUntil - Promise failed with error: background task failed" },
+        ];
+      }),
+    ).rejects.toThrow(/Worker waitUntil promise rejection:[\s\S]*background task failed/);
+    expect(await lease.run(() => "next")).toBe("next");
+    await lease.release();
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test("a released lease refuses further runs", async () => {
+  const harness = createCloudflareHarness({
+    workers: {
+      BACKEND: { configPath: "./wrangler.backend.toml" },
+    },
+  });
+  const lease = await harness.lease();
+  let ran = false;
+  await lease.release();
+
+  await expect(
+    lease.run(() => {
+      ran = true;
+    }),
+  ).rejects.toThrow("Cloudflare harness lease is released");
+  expect(ran).toBe(false);
+});
+
 test("run closes the server after callback failure", async () => {
   const harness = createCloudflareHarness({
     workers: {
