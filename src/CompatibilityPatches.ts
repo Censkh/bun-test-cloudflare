@@ -60,6 +60,8 @@ export const COMPATABILITY_PATCHES = {
     id: "undici-fetch-response-retention",
     disabledFromVersion: null,
   },
+  // capnp-es's quadratic arena growth when Miniflare serializes a large config (MiniflareCapnpArenaPatch.ts).
+  "miniflare-capnp-arena-growth": { id: "miniflare-capnp-arena-growth", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },
