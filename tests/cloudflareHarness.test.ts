@@ -39,6 +39,25 @@ describe("Cloudflare harness fixture", () => {
   );
 
   fixture.test(
+    "reuses a finished build in later test files without starting a build process",
+    ({ run }) => {
+      const buildProcessLog = path.join(fixtureRoot, "node_modules/.btcf/build-processes.log");
+      rmSync(buildProcessLog, { force: true });
+      const result = run({
+        env: { BTCF_BUILD_PROCESS_LOG: buildProcessLog },
+        // Each isolated file creates the harness again, as a suite's later test files do.
+        testArgs: ["--isolate", "--preload", "./buildProcessLog.ts"],
+        fixtureTests: ["./cloudflareHarness.fixture.ts", "./sharedBuild.fixture.ts"],
+        timeoutMs: 30_000,
+        processTimeoutMs: 40_000,
+      });
+      result.expectStatusCode(0);
+      expect(readFileSync(buildProcessLog, "utf8")).toBe("started\n");
+    },
+    45_000,
+  );
+
+  fixture.test(
     "shares concurrent builds across Bun test workers",
     ({ run }) => {
       const barrier = path.join(fixtureRoot, "node_modules/.btcf/shared-build-barrier");

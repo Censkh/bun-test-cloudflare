@@ -630,10 +630,27 @@ const prepareWorkerInput = (
   };
 };
 
+/**
+ * A finished build of this plan from the current `bun test` run. A success status never changes
+ * for its build key, so it can be read without the build lock.
+ */
+const readFinishedBuild = (plan: WorkerBuildPlan): WorkerBuildResult | undefined => {
+  const status = readBuildStatus(plan.statusPath);
+  return status?.buildKey === plan.buildKey && status.state === "success" && existsSync(status.builtMain)
+    ? { built: false, builtMain: status.builtMain }
+    : undefined;
+};
+
 const buildWorkers = (plans: WorkerBuildPlan[]): WorkerBuildResult[] => {
   // Custom build commands can write to shared project files, so retain their original order.
   if (plans.length < 2 || plans.some((plan) => plan.config.build?.command)) {
     return plans.map(buildWorkerOnce);
+  }
+  // Every test file after the first finds its Workers built: reading their status here saves
+  // starting a build process (and one per Worker, each loading Wrangler) just to read it.
+  const finished = plans.map(readFinishedBuild);
+  if (finished.every((result) => result !== undefined)) {
+    return finished as WorkerBuildResult[];
   }
   const directory = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-builds-"));
   try {
