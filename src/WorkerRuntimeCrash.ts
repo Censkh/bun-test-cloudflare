@@ -29,9 +29,13 @@ export type WorkerdProcess = {
 };
 
 export type RuntimeCrashMonitor = {
-  /** Rejects with the first crash; never settles otherwise. */
-  readonly crashed: Promise<never>;
   readonly crash: WorkerRuntimeCrashError | undefined;
+  /**
+   * Settles with the promise, or rejects with the first crash. It holds the promise only until the
+   * promise settles: racing a run-long promise instead keeps every result and its async context
+   * reachable for as long as the run lives, which pinned gigabytes of old generations.
+   */
+  untilCrash<TResult>(promise: TResult | Promise<TResult>): Promise<TResult>;
   assertAlive(): void;
   track(child: WorkerdProcess): void;
 };
@@ -46,17 +50,31 @@ export type RuntimeCrashMonitor = {
  */
 export const createRuntimeCrashMonitor = (): RuntimeCrashMonitor => {
   let crash: WorkerRuntimeCrashError | undefined;
-  let rejectCrashed!: (error: WorkerRuntimeCrashError) => void;
-  const crashed = new Promise<never>((_, reject) => {
-    rejectCrashed = reject;
-  });
-  crashed.catch(() => {});
+  const waiting = new Set<(error: WorkerRuntimeCrashError) => void>();
 
   return {
-    crashed,
     get crash() {
       return crash;
     },
+    untilCrash: (promise) =>
+      new Promise((resolve, reject) => {
+        if (crash) {
+          Promise.resolve(promise).catch(() => {});
+          reject(crash);
+          return;
+        }
+        waiting.add(reject);
+        Promise.resolve(promise).then(
+          (value) => {
+            waiting.delete(reject);
+            resolve(value);
+          },
+          (error) => {
+            waiting.delete(reject);
+            reject(error);
+          },
+        );
+      }),
     assertAlive() {
       if (crash) throw crash;
     },
@@ -70,7 +88,8 @@ export const createRuntimeCrashMonitor = (): RuntimeCrashMonitor => {
       child.once("exit", (exitCode, signal) => {
         if (stoppedByOwner || crash) return;
         crash = new WorkerRuntimeCrashError(child.pid, exitCode, signal);
-        rejectCrashed(crash);
+        for (const reject of waiting) reject(crash);
+        waiting.clear();
       });
     },
   };

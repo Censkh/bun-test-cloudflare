@@ -440,7 +440,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
   /** Waits for the promise, or rejects at once if the runtime crashes first. */
   #untilRuntimeCrash<TResult>(promise: TResult | Promise<TResult>): Promise<TResult> {
-    return Promise.race([promise, this.#runtime.crashed]);
+    return this.#runtime.untilCrash(promise);
   }
 
   async #resetWorkerGeneration() {
