@@ -18,7 +18,6 @@ export const COMPATABILITY_PATCHES = {
   "undici-commonjs-require": { id: "undici-commonjs-require", disabledFromVersion: "1.4.0" },
   websocket: { id: "websocket", disabledFromVersion: "1.4.0" },
   "miniflare-headers": { id: "miniflare-headers", disabledFromVersion: "1.4.0" },
-  "wrangler-guess-worker-format": { id: "wrangler-guess-worker-format", disabledFromVersion: "1.4.0" },
   "miniflare-loopback": { id: "miniflare-loopback", disabledFromVersion: "1.4.0" },
   "miniflare-loopback-launch": { id: "miniflare-loopback-launch", disabledFromVersion: "1.4.0" },
   "miniflare-loopback-close": { id: "miniflare-loopback-close", disabledFromVersion: "1.4.0" },
@@ -72,6 +71,10 @@ export const COMPATABILITY_PATCHES = {
   "wrangler-dev-env-force-local": { id: "wrangler-dev-env-force-local", disabledFromVersion: null },
   // Wrangler's blanket Bun refusal, which the undici patch makes unnecessary (WranglerBunDetectionPatch.ts).
   "wrangler-bun-detection": { id: "wrangler-bun-detection", disabledFromVersion: null },
+  // Bun kills esbuild's service when a test times out; esbuild never restarts it (WranglerGuessWorkerFormatPatch.ts).
+  "esbuild-service-restart": { id: "esbuild-service-restart", disabledFromVersion: null },
+  // Generation resets otherwise wait on esbuild's service, which can leave a request unanswered (same file).
+  "wrangler-guess-worker-format": { id: "wrangler-guess-worker-format", disabledFromVersion: null },
 } as const satisfies Record<string, { id: string; disabledFromVersion: string | null }>;
 
 export type CompatibilityPatchName = (typeof COMPATABILITY_PATCHES)[keyof typeof COMPATABILITY_PATCHES]["id"];

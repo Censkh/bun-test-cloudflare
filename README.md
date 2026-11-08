@@ -109,6 +109,10 @@ test("calls the backend worker", async () => {
 
 `run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool stays alive until Bun's suite cleanup. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
 
+### When the runtime dies
+
+When a test times out, Bun kills every child process, including workerd and esbuild's service. If a run's workerd exits without the harness stopping it, whether Bun killed it or it crashed, that run and any lease on it reject at once with a `WorkerRuntimeCrashError` (`code: "ERR_WORKER_RUNTIME_CRASHED"`) instead of waiting on the dead runtime. The next `run()` starts a new runtime. A dead or unresponsive esbuild service is restarted on its next use (the `esbuild-service-restart` patch), and each Worker's format probe asks it only once per test file (`wrangler-guess-worker-format`), so resets don't depend on it.
+
 ### Isolated Worker slots
 
 For harnesses that use supported storage, value, Images, internal service, and Durable Object bindings, `isolatedWorkerSlots` can amortize one workerd startup across multiple test runs while preserving Worker global and storage isolation:

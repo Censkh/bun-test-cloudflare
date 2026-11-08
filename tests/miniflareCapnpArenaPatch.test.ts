@@ -1,12 +1,15 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
 import { shouldInstallCompatibilityPatch } from "../src/CompatibilityPatches";
-
-await import("../src/setup");
+import { installMiniflareSourcePatch } from "../src/patches/MiniflareSourcePatch";
 
 const miniflarePath = require.resolve("miniflare", {
   paths: [path.dirname(require.resolve("wrangler/package.json"))],
 });
+
+// Test files share a process, and an earlier one may have loaded Miniflare without the patch.
+delete require.cache[miniflarePath];
+installMiniflareSourcePatch({ capnpArenaGrowth: true, proxyClassMembers: false });
 
 // Shaped like a harness generation: several slots, each a large bundle followed by small modules and bindings.
 const largeConfig = () => ({

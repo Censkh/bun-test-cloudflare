@@ -154,6 +154,12 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
         if (!this.#inUse.delete(run)) {
           return;
         }
+        if (run.runtimeCrash) {
+          // The run already failed with the crash; the pool replaces it with a new runtime.
+          await run.close().catch(() => {});
+          this.#fillWarmPool();
+          return;
+        }
 
         try {
           run.flushLogs();
@@ -335,7 +341,10 @@ export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> im
     try {
       this.#assertOpen();
       const run = this.#run;
-      if (run) {
+      if (run?.runtimeCrash) {
+        this.#run = undefined;
+        await run.close().catch(() => {});
+      } else if (run) {
         await run.resetForReuse();
         await run.assertUsable();
         return { run, release };

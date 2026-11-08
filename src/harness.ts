@@ -51,6 +51,7 @@ export type TypeToken<T> = {
 
 export const typeToken = <T>(): TypeToken<T> => ({});
 
+export { WORKER_RUNTIME_CRASHED, WorkerRuntimeCrashError } from "./WorkerRuntimeCrash";
 export { closePrewarmedServerOrchestrators };
 
 export type CloudflareWorkerConfig<TBindings = Record<string, any>> = WorkerInput & {

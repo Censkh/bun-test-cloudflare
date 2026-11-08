@@ -9,6 +9,12 @@ import { createWorkerCacheStorage, getCapturedRuntimeCaches, runWithCloudflareCa
 import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
 import { getObservedBrowserRenderingLaunchCount } from "./patches/BrowserRenderingPatch";
+import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
+import {
+  createRuntimeCrashMonitor,
+  runWithWorkerdProcessOwner,
+  type WorkerRuntimeCrashError,
+} from "./WorkerRuntimeCrash";
 import {
   type CapturedDevEnv,
   createAsyncOperationTracker,
@@ -43,6 +49,9 @@ type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> 
   workerEntries: Array<[keyof TWorkers, CloudflareWorkerConfig]>;
   workerSlotNames?: string[][];
 };
+
+// Crash detection needs the spawn hook even when the setup preload isn't used.
+installWorkerdChildProcessPatch();
 
 const harnessRunContext = new AsyncLocalStorage<CloudflareHarnessRunContext<any>>();
 const timingOrigin = performance.now();
@@ -203,6 +212,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   readonly #exposedServer: TestHarness;
   readonly #server: TestHarness;
   readonly #logStream: ReturnType<typeof streamServerLogs>;
+  readonly #runtime = createRuntimeCrashMonitor();
   readonly #storageRoot = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-"));
   #activeWorkerSlot = 0;
   #cacheStorage: CacheStorage | undefined;
@@ -243,8 +253,12 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     this.#startPromise ??= (async () => {
       const startedAt = performance.now();
       const listenStartedAt = performance.now();
-      await this.#runWithFreshStorage(() =>
-        devEnvCaptureContext.run(this.#capturedDevEnvs, () => this.#server.listen()),
+      await this.#untilRuntimeCrash(
+        this.#runWithFreshStorage(() =>
+          devEnvCaptureContext.run(this.#capturedDevEnvs, () =>
+            runWithWorkerdProcessOwner(this.#runtime, () => this.#server.listen()),
+          ),
+        ),
       );
       logTiming(`${this.#timingLabel} start:listen`, listenStartedAt);
 
@@ -269,7 +283,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
     try {
       return await platformProxyDispatchContext.run(this.#platformProxyDispatches, async () => {
-        await this.start();
+        await this.#untilRuntimeCrash(this.start());
         const workers = this.#workers;
         if (!workers) {
           throw new Error("Cloudflare harness run failed to start");
@@ -282,7 +296,9 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
         const callbackStartedAt = performance.now();
         try {
-          return await (this.#cacheStorage ? runWithCloudflareCaches(this.#cacheStorage, runCallback) : runCallback());
+          return await this.#untilRuntimeCrash(
+            this.#cacheStorage ? runWithCloudflareCaches(this.#cacheStorage, runCallback) : runCallback(),
+          );
         } finally {
           logTiming(`${this.#timingLabel} execute:callback`, callbackStartedAt);
         }
@@ -297,12 +313,12 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
   async assertUsable() {
     const startedAt = performance.now();
-    await this.start();
+    await this.#untilRuntimeCrash(this.start());
     if (!this.#workers) {
       throw new Error("Cloudflare harness run failed to start");
     }
 
-    await Promise.all(Object.values(this.#workers).map((worker) => worker.getEnv()));
+    await this.#untilRuntimeCrash(Promise.all(Object.values(this.#workers).map((worker) => worker.getEnv())));
     logTiming(`${this.#timingLabel} assert-usable`, startedAt);
   }
 
@@ -316,7 +332,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       throw new Error("Cloudflare harness run is closed");
     }
 
-    await this.#settleBackgroundWork();
+    await this.#untilRuntimeCrash(this.#settleBackgroundWork());
     this.#logStream.flush();
     if (this.canRotateWorkerSlotForReuse()) {
       const slotStartedAt = performance.now();
@@ -326,7 +342,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       logTiming(`${this.#timingLabel} reset:slot`, slotStartedAt);
     } else {
       this.#activeWorkerSlot = 0;
-      await this.#resetWorkerGeneration();
+      await this.#untilRuntimeCrash(this.#resetWorkerGeneration());
     }
     this.#server.clearLogs();
     logTiming(`${this.#timingLabel} reset`, startedAt);
@@ -348,7 +364,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       throw new Error("Cloudflare harness run is closed");
     }
 
-    await this.#settleBackgroundWork();
+    await this.#untilRuntimeCrash(this.#settleBackgroundWork());
     this.flushLogs();
     logTiming(`${this.#timingLabel} settle`, startedAt);
   }
@@ -376,21 +392,29 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] draining runtime messages");
     }
-    await debugCleanup("drain-harness-before-browser-close", () =>
-      drainHarnessRun({
-        devEnvs: this.#capturedDevEnvs,
-        drainBrowserRendering: this.options.hasBrowserRendering,
-        platformProxyDispatches: this.#platformProxyDispatches,
-      }),
-    );
-    await debugCleanup("close-active-browser-sessions", () => this.#closeActiveBrowserRenderingSessions());
-    await debugCleanup("drain-harness-after-browser-close", () =>
-      drainHarnessRun({
-        devEnvs: this.#capturedDevEnvs,
-        drainBrowserRendering: this.options.hasBrowserRendering,
-        platformProxyDispatches: this.#platformProxyDispatches,
-      }),
-    );
+    // Work waiting on a crashed runtime may never settle, so a crash skips or ends the drains.
+    const drain = async () => {
+      await debugCleanup("drain-harness-before-browser-close", () =>
+        drainHarnessRun({
+          devEnvs: this.#capturedDevEnvs,
+          drainBrowserRendering: this.options.hasBrowserRendering,
+          platformProxyDispatches: this.#platformProxyDispatches,
+        }),
+      );
+      await debugCleanup("close-active-browser-sessions", () => this.#closeActiveBrowserRenderingSessions());
+      await debugCleanup("drain-harness-after-browser-close", () =>
+        drainHarnessRun({
+          devEnvs: this.#capturedDevEnvs,
+          drainBrowserRendering: this.options.hasBrowserRendering,
+          platformProxyDispatches: this.#platformProxyDispatches,
+        }),
+      );
+    };
+    if (!this.#runtime.crash) {
+      await this.#untilRuntimeCrash(drain()).catch((error) => {
+        if (error !== this.#runtime.crash) throw error;
+      });
+    }
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] drained harness run");
     }
@@ -409,21 +433,33 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     this.#logStream.assertNoWaitUntilFailures();
   }
 
+  /** The crash that condemned this run's runtime, if any; such a run must be closed, not reused. */
+  get runtimeCrash(): WorkerRuntimeCrashError | undefined {
+    return this.#runtime.crash;
+  }
+
+  /** Waits for the promise, or rejects at once if the runtime crashes first. */
+  #untilRuntimeCrash<TResult>(promise: TResult | Promise<TResult>): Promise<TResult> {
+    return Promise.race([promise, this.#runtime.crashed]);
+  }
+
   async #resetWorkerGeneration() {
     const generationStartedAt = performance.now();
     this.#capturedDevEnvs.length = 0;
     try {
       await this.#runWithFreshStorage(() =>
-        devEnvCaptureContext.run(this.#capturedDevEnvs, async () => {
-          try {
-            await this.#server.reset();
-          } catch (error) {
-            if (!isMissingMiniflareDispatcherClose(error)) {
-              throw error;
+        devEnvCaptureContext.run(this.#capturedDevEnvs, () =>
+          runWithWorkerdProcessOwner(this.#runtime, async () => {
+            try {
+              await this.#server.reset();
+            } catch (error) {
+              if (!isMissingMiniflareDispatcherClose(error)) {
+                throw error;
+              }
+              await this.#server.listen();
             }
-            await this.#server.listen();
-          }
-        }),
+          }),
+        ),
       );
     } finally {
       logTiming(`${this.#timingLabel} reset:generation`, generationStartedAt);

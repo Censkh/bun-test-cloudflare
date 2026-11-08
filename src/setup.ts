@@ -19,10 +19,7 @@ import { installWebsocketPatch } from "./patches/WebsocketPatch";
 import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
 import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
 import { installWranglerBunDetectionPatch } from "./patches/WranglerBunDetectionPatch";
-import {
-  installWranglerGuessWorkerFormatPatch,
-  stopWranglerEsbuildService,
-} from "./patches/WranglerGuessWorkerFormatPatch";
+import { installWranglerEsbuildPatch, stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
 import { installWsCloseHandshakePatch } from "./patches/WsCloseHandshakePatch";
 
 const installCompatibilityPatch = (patchName: CompatibilityPatchName, install: () => void) => {
@@ -47,15 +44,7 @@ if (!shouldInstallCompatibilityPatch("websocket")) {
   installCompatibilityPatch("ws-close-handshake", installWsCloseHandshakePatch);
 }
 installCompatibilityPatch("child-process-extra-fd", installChildProcessExtraFdPatch);
-if (
-  shouldInstallCompatibilityPatchGroup("workerd-child-process", [
-    "workerd-child-process-stdio-errors",
-    "workerd-child-process-unref",
-    "workerd-child-process-stdio-unref",
-  ])
-) {
-  installWorkerdChildProcessPatch();
-}
+installWorkerdChildProcessPatch();
 if (shouldInstallCompatibilityPatchGroup("browser-rendering", ["browser-rendering-spawn"])) {
   installBrowserRenderingPatch();
 }
@@ -68,7 +57,10 @@ installMiniflareSourcePatch({
   proxyClassMembers: shouldInstallCompatibilityPatch("miniflare-proxy-class-members"),
 });
 installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
-installCompatibilityPatch("wrangler-guess-worker-format", installWranglerGuessWorkerFormatPatch);
+installWranglerEsbuildPatch({
+  cacheGuessWorkerFormat: shouldInstallCompatibilityPatch("wrangler-guess-worker-format"),
+  restartStoppedService: shouldInstallCompatibilityPatch("esbuild-service-restart"),
+});
 if (
   shouldInstallCompatibilityPatchGroup("miniflare-loopback", [
     "miniflare-loopback-launch",

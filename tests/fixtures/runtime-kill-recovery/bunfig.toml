@@ -1,0 +1,2 @@
+[test]
+preload = ["./workerdProcesses.ts", "bun-test-cloudflare/setup"]
