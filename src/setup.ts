@@ -9,9 +9,9 @@ import { closePrewarmedServerOrchestrators } from "./PrewarmedServerOrchestrator
 import { installBrowserRenderingPatch } from "./patches/BrowserRenderingPatch";
 import { installChildProcessExtraFdPatch } from "./patches/ChildProcessExtraFdPatch";
 import { installCloudflareWorkersPatch } from "./patches/CloudflareWorkersPatch";
-import { installMiniflareCapnpArenaPatch } from "./patches/MiniflareCapnpArenaPatch";
 import { installMiniflareLoopbackPatch } from "./patches/MiniflareLoopbackPatch";
 import { installMiniflarePatch } from "./patches/MiniflarePatch";
+import { installMiniflareSourcePatch } from "./patches/MiniflareSourcePatch";
 import { installMiniflareWebGlobalsPatch } from "./patches/MiniflareWebGlobalsPatch";
 import { installUndiciPatch } from "./patches/UndiciPatch";
 import { installWebStreamPatch } from "./patches/WebStreamPatch";
@@ -63,7 +63,10 @@ installCompatibilityPatch("undici", installUndiciPatch);
 installCompatibilityPatch("websocket", installWebsocketPatch);
 installCompatibilityPatch("worker-threads", installWorkerThreadsPatch);
 // Loads Miniflare, so it must follow the undici and ws mocks above and precede every patch below.
-installCompatibilityPatch("miniflare-capnp-arena-growth", installMiniflareCapnpArenaPatch);
+installMiniflareSourcePatch({
+  capnpArenaGrowth: shouldInstallCompatibilityPatch("miniflare-capnp-arena-growth"),
+  proxyClassMembers: shouldInstallCompatibilityPatch("miniflare-proxy-class-members"),
+});
 installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
 installCompatibilityPatch("wrangler-guess-worker-format", installWranglerGuessWorkerFormatPatch);
 if (
