@@ -2,8 +2,3 @@ name = "cms-fixture"
 main = "src/cms.ts"
 compatibility_date = "2025-08-15"
 compatibility_flags = ["nodejs_compat"]
-
-[[d1_databases]]
-binding = "DB"
-database_name = "cms"
-database_id = "cms-fixture-db"

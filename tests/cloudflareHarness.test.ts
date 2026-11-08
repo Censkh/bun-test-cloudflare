@@ -58,15 +58,6 @@ describe("Cloudflare harness fixture", () => {
   );
 
   fixture.test(
-    "runs D1 queries from test code without blocking lookups per statement",
-    ({ run }) => {
-      const result = run({ fixtureTests: ["./proxyQueries.fixture.ts"], timeoutMs: 30_000 });
-      result.expectStatusCode(0);
-    },
-    45_000,
-  );
-
-  fixture.test(
     "shares concurrent builds across Bun test workers",
     ({ run }) => {
       const barrier = path.join(fixtureRoot, "node_modules/.btcf/shared-build-barrier");

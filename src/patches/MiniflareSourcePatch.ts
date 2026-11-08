@@ -22,11 +22,6 @@ export type MiniflareSourceTransform = {
 
 const localRequire = require;
 
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/** Matches the code with any whitespace between its tokens, so reformatting doesn't break it. */
-const code = (snippet: string) => new RegExp(snippet.trim().split(/\s+/).map(escapeRegExp).join("\\s*"), "g");
-
 /**
  * Miniflare serializes each workerd config with capnp-es (bundled; up to capnp-es 0.0.16 at least),
  * whose single-segment arena grows by only the bytes each allocation needs (at least 4 KiB) and
@@ -48,62 +43,9 @@ export const capnpArenaGrowth: MiniflareSourceTransform = {
   ],
 };
 
-const proxyClassMembersHelper = `var btcfProxyClassMembers = /* @__PURE__ */ new Map();
-var btcfGetProxyClassMembers = (name) => {
-  if (typeof name !== "string" || !(name.startsWith("D1") || name.startsWith("R2") || name === "KvNamespace")) return void 0;
-  let members = btcfProxyClassMembers.get(name);
-  if (members === void 0) btcfProxyClassMembers.set(name, members = /* @__PURE__ */ new Map());
-  return members;
-};
-`;
-
-/**
- * Miniflare's platform proxy learns, per proxied object, that a property is a method and that the
- * method is async. Each D1 query makes a new prepared statement, so test code paid two blocking
- * round trips to workerd per query (looking up `all` or `run`, then calling it synchronously)
- * before the async call. The storage bindings' classes have fixed prototypes, as Miniflare's own
- * per-object cache already assumes, so the patch remembers both facts per class for them.
- */
-export const proxyClassMembers: MiniflareSourceTransform = {
-  marker: "ProxyStubHandler",
-  name: "the platform proxy's method cache",
-  replacements: [
-    {
-      pattern: code("var ProxyStubHandler = class extends Function {"),
-      replace: (match) => `${proxyClassMembersHelper}${match}`,
-    },
-    {
-      // Miniflare 4 writes these ifs without braces.
-      pattern:
-        /const maybeKnown = this\.#knownValues\.get\(key\);\s*if \(maybeKnown !== void 0\)\s*(?:\{\s*return maybeKnown;\s*\}|return maybeKnown;)/g,
-      replace: (match) => `${match}
-    if (btcfGetProxyClassMembers(this.target[kName])?.has(key)) {
-      const knownFunction = this.#createFunction(key);
-      this.#knownValues.set(key, knownFunction);
-      return knownFunction;
-    }`,
-    },
-    {
-      pattern: code(`if (syncRes.headers.get(CoreHeaders.OP_RESULT_TYPE) === "Function") {`),
-      replace: (match) => `${match}
-      const btcfClassMembers = btcfGetProxyClassMembers(this.target[kName]);
-      if (btcfClassMembers !== void 0 && !btcfClassMembers.has(key)) btcfClassMembers.set(key, false);`,
-    },
-    {
-      pattern: code("#createFunction(key) { let knownAsync = false;"),
-      replace: () => `#createFunction(key) {
-    const btcfClassMembers = btcfGetProxyClassMembers(this.target[kName]);
-    let knownAsync = btcfClassMembers?.get(key) === true;`,
-    },
-    {
-      pattern: /if \(!knownAsync && result instanceof Promise\)\s*(\{)?\s*knownAsync = true;/g,
-      replace: (_match, brace) =>
-        `if (!knownAsync && result instanceof Promise) {
-          knownAsync = true;
-          btcfClassMembers?.set(key, true);${brace ? "" : "\n        }"}`,
-    },
-  ],
-};
+// Don't cache the platform proxy's methods per class to save its blocking round trips. An in-flight
+// async call holds the proxy's handler, not the proxy, so a statement can be collected and freed on
+// the server while its call is queued; each new object's first call being synchronous prevents that.
 
 export type MiniflareSourceTransformResult = {
   applied: string[];
@@ -145,12 +87,8 @@ const warn = (message: string) => process.stderr.write(`[bun-test-cloudflare] ${
  * path, so every later `require` shares the patched exports. Install after the undici and ws mocks
  * and before anything else loads Miniflare: its bundle requires its dependencies now.
  */
-export const installMiniflareSourcePatch = (enabled: { capnpArenaGrowth: boolean; proxyClassMembers: boolean }) => {
-  const transforms = [
-    ...(enabled.capnpArenaGrowth ? [capnpArenaGrowth] : []),
-    ...(enabled.proxyClassMembers ? [proxyClassMembers] : []),
-  ];
-  if (transforms.length === 0) return;
+export const installMiniflareSourcePatch = () => {
+  const transforms = [capnpArenaGrowth];
 
   const wranglerPackageJsonPath = localRequire.resolve("wrangler/package.json");
   const miniflarePath = localRequire.resolve("miniflare", { paths: [path.dirname(wranglerPackageJsonPath)] });
