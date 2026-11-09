@@ -9,7 +9,7 @@ const miniflarePath = require.resolve("miniflare", {
 
 // Test files share a process, and an earlier one may have loaded Miniflare without the patch.
 delete require.cache[miniflarePath];
-installMiniflareSourcePatch();
+installMiniflareSourcePatch({ capnpArenaGrowth: true, proxyCallRetention: false });
 
 // Shaped like a harness generation: several slots, each a large bundle followed by small modules and bindings.
 const largeConfig = () => ({

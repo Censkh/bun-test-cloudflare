@@ -43,9 +43,48 @@ export const capnpArenaGrowth: MiniflareSourceTransform = {
   ],
 };
 
-// Don't cache the platform proxy's methods per class to save its blocking round trips. An in-flight
-// async call holds the proxy's handler, not the proxy, so a statement can be collected and freed on
-// the server while its call is queued; each new object's first call being synchronous prevents that.
+const proxyCallRetentionHelper = `var btcfInFlightProxyCalls = /* @__PURE__ */ new Set();
+var btcfHoldUntilSettled = (handler, args, result) => {
+  if (!(result instanceof Promise)) return result;
+  const call = { handler, args };
+  btcfInFlightProxyCalls.add(call);
+  const release = () => btcfInFlightProxyCalls.delete(call);
+  result.then(release, release);
+  return result;
+};
+`;
+
+/**
+ * Miniflare frees a proxy's object on the server 100 ms after the proxy is collected, but nothing
+ * keeps a proxy alive during its own call: an async call holds only the proxy's handler, and a
+ * Fetcher's fetch not even that once dispatched. Durable Object stubs and fetches are always async
+ * and usually short-lived, so on a busy machine a queued call could reach the server after its
+ * target was freed and fail with "AssertionError: false == true". Each in-flight call now keeps its
+ * handler and arguments, and a handler its proxy, until the call settles.
+ */
+export const proxyCallRetention: MiniflareSourceTransform = {
+  marker: "ProxyStubHandler",
+  name: "the platform proxy's call retention",
+  replacements: [
+    {
+      pattern: /var ProxyStubHandler = class extends Function \{/g,
+      replace: (match) => `${proxyCallRetentionHelper}${match}`,
+    },
+    {
+      pattern: /const proxy = new Proxy\(proxyTarget, handler\);/g,
+      replace: (match) => `${match}\n    handler.btcfProxy = proxy;`,
+    },
+    {
+      pattern:
+        /const result = this\.#call\(\s*"__miniflareWrappedFunction",\s*this\.#thisFnKnownAsync,\s*args\[1\],\s*this\s*\);/g,
+      replace: (match) => `${match}\n    btcfHoldUntilSettled(this, args[1], result);`,
+    },
+    {
+      pattern: /const result = this\.#call\(key, knownAsync, args, func\);/g,
+      replace: (match) => `${match}\n        btcfHoldUntilSettled(this, args, result);`,
+    },
+  ],
+};
 
 export type MiniflareSourceTransformResult = {
   applied: string[];
@@ -87,8 +126,12 @@ const warn = (message: string) => process.stderr.write(`[bun-test-cloudflare] ${
  * path, so every later `require` shares the patched exports. Install after the undici and ws mocks
  * and before anything else loads Miniflare: its bundle requires its dependencies now.
  */
-export const installMiniflareSourcePatch = () => {
-  const transforms = [capnpArenaGrowth];
+export const installMiniflareSourcePatch = (enabled: { capnpArenaGrowth: boolean; proxyCallRetention: boolean }) => {
+  const transforms = [
+    ...(enabled.capnpArenaGrowth ? [capnpArenaGrowth] : []),
+    ...(enabled.proxyCallRetention ? [proxyCallRetention] : []),
+  ];
+  if (transforms.length === 0) return;
 
   const wranglerPackageJsonPath = localRequire.resolve("wrangler/package.json");
   const miniflarePath = localRequire.resolve("miniflare", { paths: [path.dirname(wranglerPackageJsonPath)] });

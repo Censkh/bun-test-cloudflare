@@ -52,7 +52,10 @@ installCompatibilityPatch("undici", installUndiciPatch);
 installCompatibilityPatch("websocket", installWebsocketPatch);
 installCompatibilityPatch("worker-threads", installWorkerThreadsPatch);
 // Loads Miniflare, so it must follow the undici and ws mocks above and precede every patch below.
-installCompatibilityPatch("miniflare-capnp-arena-growth", installMiniflareSourcePatch);
+installMiniflareSourcePatch({
+  capnpArenaGrowth: shouldInstallCompatibilityPatch("miniflare-capnp-arena-growth"),
+  proxyCallRetention: shouldInstallCompatibilityPatch("miniflare-proxy-call-retention"),
+});
 installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
 installWranglerEsbuildPatch({
   cacheGuessWorkerFormat: shouldInstallCompatibilityPatch("wrangler-guess-worker-format"),

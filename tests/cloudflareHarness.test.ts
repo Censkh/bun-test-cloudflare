@@ -58,6 +58,19 @@ describe("Cloudflare harness fixture", () => {
   );
 
   fixture.test(
+    "keeps a proxy alive for its call and lets it go afterwards",
+    ({ run }) => {
+      const result = run({
+        fixtureTests: ["./proxyCallRetention.fixture.ts"],
+        timeoutMs: 120_000,
+        processTimeoutMs: 130_000,
+      });
+      result.expectStatusCode(0);
+    },
+    140_000,
+  );
+
+  fixture.test(
     "shares concurrent builds across Bun test workers",
     ({ run }) => {
       const barrier = path.join(fixtureRoot, "node_modules/.btcf/shared-build-barrier");

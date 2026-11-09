@@ -61,6 +61,8 @@ export const COMPATABILITY_PATCHES = {
   },
   // capnp-es's quadratic arena growth when Miniflare serializes a large config (MiniflareSourcePatch.ts).
   "miniflare-capnp-arena-growth": { id: "miniflare-capnp-arena-growth", disabledFromVersion: null },
+  // Miniflare frees a proxy's server object while a call on it is still queued (MiniflareSourcePatch.ts).
+  "miniflare-proxy-call-retention": { id: "miniflare-proxy-call-retention", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },

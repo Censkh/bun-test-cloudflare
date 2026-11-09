@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { applyMiniflareSourceTransforms, capnpArenaGrowth } from "../src/patches/MiniflareSourcePatch";
+import {
+  applyMiniflareSourceTransforms,
+  capnpArenaGrowth,
+  proxyCallRetention,
+} from "../src/patches/MiniflareSourcePatch";
 
 const installedMiniflareSource = () =>
   readFileSync(
@@ -9,11 +13,14 @@ const installedMiniflareSource = () =>
     "utf8",
   );
 
-test("the Miniflare source transform fits the installed Miniflare", () => {
-  const { applied, unmatched } = applyMiniflareSourceTransforms(installedMiniflareSource(), [capnpArenaGrowth]);
+test("the Miniflare source transforms fit the installed Miniflare", () => {
+  const { applied, unmatched } = applyMiniflareSourceTransforms(installedMiniflareSource(), [
+    capnpArenaGrowth,
+    proxyCallRetention,
+  ]);
 
   expect(unmatched).toEqual([]);
-  expect(applied).toEqual([capnpArenaGrowth.name]);
+  expect(applied).toEqual([capnpArenaGrowth.name, proxyCallRetention.name]);
 });
 
 test("a Miniflare whose code no longer fits a transform runs without it, unchanged", () => {
@@ -32,7 +39,7 @@ test("a Miniflare whose code no longer fits a transform runs without it, unchang
 test("a Miniflare without the code a transform targets runs without it, unreported", () => {
   const source = "export const serializeConfig = () => new Uint8Array();\n";
 
-  const result = applyMiniflareSourceTransforms(source, [capnpArenaGrowth]);
+  const result = applyMiniflareSourceTransforms(source, [capnpArenaGrowth, proxyCallRetention]);
 
   expect(result).toEqual({ applied: [], unmatched: [], source });
 });
