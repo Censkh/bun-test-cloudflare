@@ -40,6 +40,16 @@ export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: 
     return typeof binding.service === "string" && workerNames.has(binding.service);
   }
   if (binding.type === "queue") return typeof binding.queue_name === "string";
+  // Each slot runs its own copy of a Workflow, under a slot's name; one in another Worker must be
+  // one of the slot's Workers.
+  if (binding.type === "workflow") {
+    return (
+      typeof binding.name === "string" &&
+      typeof binding.class_name === "string" &&
+      (binding.script_name === undefined ||
+        (typeof binding.script_name === "string" && workerNames.has(binding.script_name)))
+    );
+  }
   if (binding.type === "ratelimit") return typeof binding.namespace_id === "string";
   // Shared by every slot, as they are by every generation: Hyperdrive reaches an outside database,
   // Browser Rendering a local browser whose sessions each reset closes, and sent email and Analytics
@@ -287,6 +297,13 @@ const createSlotInput = (
         namespace_id: `${binding.namespace_id}${slot}`,
       })),
       rules: [getSlotModuleRule(config.main, cacheNamespaceModule), ...(config.rules ?? [])],
+      workflows: config.workflows?.map((binding: Record<string, any>) => ({
+        ...binding,
+        ...appendSlotProperty(binding, "name", slot),
+        ...(typeof binding.script_name === "string" && slotWorkerNames.has(binding.script_name)
+          ? { script_name: slotWorkerNames.get(binding.script_name) }
+          : {}),
+      })),
       services: config.services?.map((binding: Record<string, any>) => ({
         ...binding,
         ...(typeof binding.service === "string" && slotWorkerNames.has(binding.service)

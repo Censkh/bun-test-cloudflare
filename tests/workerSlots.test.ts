@@ -39,6 +39,15 @@ test("isolated Worker slots accept queues, rate limits and bindings every slot c
   expect(isSupportedSlotBinding({ type: "ratelimit" }, workerNames)).toBeFalse();
 });
 
+test("isolated Worker slots accept Workflows of their own Workers only", () => {
+  const workerNames = new Set(["worker"]);
+  const workflow = { class_name: "Flow", name: "flow", type: "workflow" };
+  expect(isSupportedSlotBinding(workflow, workerNames)).toBeTrue();
+  expect(isSupportedSlotBinding({ ...workflow, script_name: "worker" }, workerNames)).toBeTrue();
+  expect(isSupportedSlotBinding({ ...workflow, script_name: "elsewhere" }, workerNames)).toBeFalse();
+  expect(isSupportedSlotBinding({ class_name: "Flow", type: "workflow" }, workerNames)).toBeFalse();
+});
+
 test("isolated Worker slots reject unsupported and unidentified storage bindings", () => {
   expect(
     canUseIsolatedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
@@ -143,6 +152,10 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
           r2_buckets: [{ binding: "BUCKET", bucket_name: "bucket" }],
           ratelimits: [{ name: "LIMITER", namespace_id: "1001", simple: { limit: 5, period: 60 } }],
           rules: [{ globs: ["**/*.wasm"], type: "CompiledWasm" }],
+          workflows: [
+            { binding: "FLOW", class_name: "Flow", name: "flow" },
+            { binding: "OWN", class_name: "Flow", name: "own", script_name: "worker" },
+          ],
         }),
       ],
       2,
@@ -161,6 +174,11 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
       queue: "jobs--btcf-slot-1",
     });
     expect(firstConfig.ratelimits[0].namespace_id).not.toBe(secondConfig.ratelimits[0].namespace_id);
+    // Each slot runs its own Workflow instances, in its own Worker.
+    expect(secondConfig.workflows).toEqual([
+      { binding: "FLOW", class_name: "Flow", name: "flow--btcf-slot-1" },
+      { binding: "OWN", class_name: "Flow", name: "own--btcf-slot-1", script_name: "worker--btcf-slot-1" },
+    ]);
     expect(fs.readFileSync(firstConfig.main, "utf8")).toContain("cache-namespace.js");
     expect(firstConfig.rules[0]).toEqual({
       fallthrough: true,
