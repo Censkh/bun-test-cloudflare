@@ -29,14 +29,15 @@ const localRequire = require;
  * isolated slot) is over 100 MB, so every small struct written after the modules copies it again:
  * each new workerd generation left gigabytes of discarded ArrayBuffers and blocked the event loop
  * for over a second. Doubling instead makes the copies linear. Only `byteLength` is ever written
- * out, so the serialized bytes are unchanged.
+ * out, so the serialized bytes are unchanged. Miniflare 5's capnp-es already grows by at least the
+ * buffer's own length and no longer clamps `minSize` itself, so the transform leaves it alone.
  */
 export const capnpArenaGrowth: MiniflareSourceTransform = {
-  marker: "MIN_SINGLE_SEGMENT_GROWTH",
+  marker: "minSize < MIN_SINGLE_SEGMENT_GROWTH",
   name: "capnp's single-segment arena growth",
   replacements: [
     {
-      pattern: /(\w+)\.buffer\s*=\s*new ArrayBuffer\(\s*(\w+)\.byteLength\s*\+\s*(\w+)\s*\)\s*;/g,
+      pattern: /(\w+)\.buffer\s*=\s*new ArrayBuffer\(\s*(\w+)\.byteLength\s*\+\s*(minSize)\s*\)\s*;/g,
       replace: (_match, arena, source, minSize) =>
         `${arena}.buffer = new ArrayBuffer(${source}.byteLength + Math.max(${minSize}, ${source}.byteLength));`,
     },
@@ -67,7 +68,8 @@ export const proxyCallRetention: MiniflareSourceTransform = {
   name: "the platform proxy's call retention",
   replacements: [
     {
-      pattern: /var ProxyStubHandler = class extends Function \{/g,
+      // Miniflare 5 assigns the class inside its module's lazy initializer instead of declaring it.
+      pattern: /(?:var )?ProxyStubHandler = class extends Function \{/g,
       replace: (match) => `${proxyCallRetentionHelper}${match}`,
     },
     {
