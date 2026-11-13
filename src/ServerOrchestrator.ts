@@ -8,6 +8,8 @@ export type HarnessRunLease<TWorkers extends Record<string, any>> = {
 export type ServerOrchestrator<TWorkers extends Record<string, any>> = {
   acquire(): Promise<HarnessRunLease<TWorkers>>;
   close(): Promise<void>;
+  /** Frees what the orchestrator keeps ready for later leases, while another harness is in use. */
+  releaseIdleRuns?(): void;
 };
 
 export class InlineServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {

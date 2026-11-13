@@ -100,6 +100,8 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   // Runs that lost a start race, closing once their own start settles
   readonly #closing = new Set<Promise<void>>();
   #closed = false;
+  // Set while another harness holds the leases, so the pool stops refilling until this one is used.
+  #idle = false;
 
   constructor(
     private readonly createRun: () => HarnessRun<TWorkers>,
@@ -111,6 +113,13 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
+    // Each prewarmed run holds whole workerd processes, so a harness that isn't being used doesn't
+    // keep its pool warm while another one runs: a suite's shared harness would otherwise hold
+    // its pool through every test that uses a harness of its own.
+    for (const other of getPrewarmedServerOrchestratorRegistry().orchestrators) {
+      if (other !== this) other.releaseIdleRuns?.();
+    }
+    this.#idle = false;
 
     let run: HarnessRun<TWorkers>;
     let discardedRuns = 0;
@@ -168,7 +177,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
           this.#fillWarmPool();
           throw error;
         }
-        if (!this.#closed && this.#available.length + this.#inUse.size < this.poolSize) {
+        if (!this.#closed && !this.#idle && this.#available.length + this.#inUse.size < this.poolSize) {
           this.#available.push(this.#createResetRun(run));
         } else {
           await run.close();
@@ -190,6 +199,16 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
       ...this.#closing,
     ]);
     this.#inUse.clear();
+  }
+
+  /**
+   * Closes the prewarmed runs no lease holds, and stops refilling the pool until the next acquire.
+   * Runs in use are left alone, and close once released.
+   */
+  releaseIdleRuns() {
+    if (this.#closed) return;
+    this.#idle = true;
+    for (const warmRun of this.#available.splice(0)) this.#closeInBackground(warmRun);
   }
 
   /**
@@ -304,7 +323,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   }
 
   #fillWarmPool() {
-    if (this.#closed) return;
+    if (this.#closed || this.#idle) return;
 
     while (this.#available.length + this.#inUse.size < this.poolSize) {
       this.#available.push(this.#createStartedRun());

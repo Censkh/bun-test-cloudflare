@@ -1,3 +1,4 @@
+import { afterAll } from "bun:test";
 import crypto from "node:crypto";
 import {
   closeSync,
@@ -755,6 +756,20 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
         ? new InlineServerOrchestrator(createRun)
         : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize));
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
+  // Bun keeps one process, and one module cache, across all the test files it runs, so a pool
+  // otherwise lives until the whole run ends: every harness a file, describe block or test creates
+  // would keep its workerd processes running through every later file. The pool closes when the
+  // scope that created the harness ends instead; a harness used again later, such as one a shared
+  // module creates while the first file imports it, starts a new pool on its next run.
+  try {
+    afterAll(async () => {
+      const current = orchestrator;
+      orchestrator = undefined;
+      await current?.close();
+    });
+  } catch {
+    // Created outside a test scope; the run-wide cleanup in the setup preload closes the pool.
+  }
 
   const harness: CloudflareHarness<TWorkers> = {
     serve(options) {

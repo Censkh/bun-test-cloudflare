@@ -305,3 +305,49 @@ test("reusable server leases reset one live harness instead of recreating it", a
   expect(createdRuns).toBe(1);
   expect(events).toEqual(["started:0", "usable:0", "reset:0", "usable:0", "closed:0"]);
 });
+
+test("a harness's idle prewarmed runs close while another harness is used, and its pool restarts on its next lease", async () => {
+  const live = new Set<string>();
+  const createOrchestrator = (name: string) => {
+    let createdRuns = 0;
+    return new PrewarmedServerOrchestrator<any>(() => {
+      const runId = `${name}:${createdRuns++}`;
+      return {
+        assertUsable: async () => {},
+        close: async () => {
+          live.delete(runId);
+        },
+        flushLogs: () => {},
+        resetForReuse: async () => {},
+        start: async () => {
+          live.add(runId);
+        },
+      } as any;
+    }, 2);
+  };
+  const shared = createOrchestrator("shared");
+  const own = createOrchestrator("own");
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  try {
+    // Holding a lease on the shared harness keeps that run even while the other harness is used.
+    const sharedLease = await shared.acquire();
+    await (await own.acquire()).release();
+    await settle();
+    expect([...live].filter((runId) => runId.startsWith("shared:")).length).toBe(1);
+
+    // Released while idle, the shared run closes instead of rejoining the pool.
+    await sharedLease.release();
+    await settle();
+    expect([...live].filter((runId) => runId.startsWith("shared:"))).toEqual([]);
+    expect([...live].filter((runId) => runId.startsWith("own:")).length).toBe(2);
+
+    // Using the shared harness again starts its pool and frees the other harness's.
+    await (await shared.acquire()).release();
+    await settle();
+    expect([...live].filter((runId) => runId.startsWith("own:"))).toEqual([]);
+    expect([...live].filter((runId) => runId.startsWith("shared:")).length).toBe(2);
+  } finally {
+    await Promise.all([shared.close(), own.close()]);
+  }
+});
