@@ -107,7 +107,7 @@ test("calls the backend worker", async () => {
 });
 ```
 
-`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool closes, stopping its workerd processes, when the test, `describe` block or file that created the harness ends; a harness used again after that, such as one a shared module creates while the first test file imports it, starts a new pool on its next run. While another harness takes leases, a harness also closes the prewarmed servers nothing is using, so only the harness in use keeps workerd processes ready; runs in progress are left alone. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
+`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool closes, stopping its workerd processes, when the test, `describe` block or file that created the harness ends; a harness used again after that, such as one a shared module creates while the first test file imports it, starts a new pool on its next run. A harness created in a `beforeAll` hook keeps its pool until the whole run ends, since Bun would end a scope tied to that hook before the tests it prepares for. Scope tracking needs the `bun-test-cloudflare/setup` preload. While another harness takes leases, a harness also closes the prewarmed servers nothing is using, so only the harness in use keeps workerd processes ready; runs in progress are left alone. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
 
 ### When the runtime dies
 

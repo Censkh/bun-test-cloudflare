@@ -1,4 +1,3 @@
-import { afterAll } from "bun:test";
 import crypto from "node:crypto";
 import {
   closeSync,
@@ -39,6 +38,7 @@ import {
   WARM_WORKERD_POOL_SIZE,
 } from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrchestrator";
+import { onCreatingScopeEnd } from "./TestScope";
 import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
 import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
@@ -760,16 +760,14 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   // otherwise lives until the whole run ends: every harness a file, describe block or test creates
   // would keep its workerd processes running through every later file. The pool closes when the
   // scope that created the harness ends instead; a harness used again later, such as one a shared
-  // module creates while the first file imports it, starts a new pool on its next run.
-  try {
-    afterAll(async () => {
-      const current = orchestrator;
-      orchestrator = undefined;
-      await current?.close();
-    });
-  } catch {
-    // Created outside a test scope; the run-wide cleanup in the setup preload closes the pool.
-  }
+  // module creates while the first file imports it, starts a new pool on its next run. A harness
+  // created in a `beforeAll` (or outside any test scope) keeps its pool until the run-wide cleanup
+  // in the setup preload, and closes its idle prewarmed servers while other harnesses take leases.
+  onCreatingScopeEnd(async () => {
+    const current = orchestrator;
+    orchestrator = undefined;
+    await current?.close();
+  });
 
   const harness: CloudflareHarness<TWorkers> = {
     serve(options) {

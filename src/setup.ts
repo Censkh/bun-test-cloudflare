@@ -1,4 +1,4 @@
-import { afterAll } from "bun:test";
+import { afterAll, afterEach, beforeEach } from "bun:test";
 import { installGlobalCachesBridge } from "./CacheBridge";
 import {
   type CompatibilityPatchName,
@@ -21,6 +21,7 @@ import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
 import { installWranglerBunDetectionPatch } from "./patches/WranglerBunDetectionPatch";
 import { installWranglerEsbuildPatch, stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
 import { installWsCloseHandshakePatch } from "./patches/WsCloseHandshakePatch";
+import { markTestFinished, markTestStarted } from "./TestScope";
 
 const installCompatibilityPatch = (patchName: CompatibilityPatchName, install: () => void) => {
   if (shouldInstallCompatibilityPatch(patchName)) {
@@ -85,6 +86,9 @@ if (
 if (shouldInstallCompatibilityPatch("undici")) {
   installCompatibilityPatch("wrangler-bun-detection", installWranglerBunDetectionPatch);
 }
+
+beforeEach(markTestStarted);
+afterEach(markTestFinished);
 
 afterAll(async () => {
   try {
