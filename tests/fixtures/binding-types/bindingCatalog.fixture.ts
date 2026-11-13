@@ -112,6 +112,7 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     "ratelimit",
     "send_email",
     "service",
+    "workflow",
   ]);
   expect(
     canUseIsolatedWorkerSlots([
