@@ -63,6 +63,9 @@ export const COMPATABILITY_PATCHES = {
   "miniflare-capnp-arena-growth": { id: "miniflare-capnp-arena-growth", disabledFromVersion: null },
   // Miniflare frees a proxy's server object while a call on it is still queued (MiniflareSourcePatch.ts).
   "miniflare-proxy-call-retention": { id: "miniflare-proxy-call-retention", disabledFromVersion: null },
+  // Bun detaches req.socket once a response is written, which breaks the socket tracking of the
+  // stoppable server Miniflare disposes its loopback server with (MiniflareSourcePatch.ts).
+  "miniflare-stoppable-socket-tracking": { id: "miniflare-stoppable-socket-tracking", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },

@@ -56,6 +56,7 @@ installCompatibilityPatch("worker-threads", installWorkerThreadsPatch);
 installMiniflareSourcePatch({
   capnpArenaGrowth: shouldInstallCompatibilityPatch("miniflare-capnp-arena-growth"),
   proxyCallRetention: shouldInstallCompatibilityPatch("miniflare-proxy-call-retention"),
+  stoppableSocketTracking: shouldInstallCompatibilityPatch("miniflare-stoppable-socket-tracking"),
 });
 installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
 installWranglerEsbuildPatch({

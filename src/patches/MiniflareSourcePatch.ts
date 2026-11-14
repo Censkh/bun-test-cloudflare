@@ -88,6 +88,38 @@ export const proxyCallRetention: MiniflareSourceTransform = {
   ],
 };
 
+/**
+ * Miniflare stops its loopback server with stoppable, which counts each socket's requests and, on
+ * `dispose()`, ends every socket it still tracks. Bun detaches `req.socket` once a response is
+ * written, so stoppable's `finish` handler stored the count under `null` and its forced close then
+ * threw "null is not an object (evaluating 'socket.end')" from a timer, failing whichever test was
+ * running when a harness disposed a Miniflare. Each request now keeps the socket it arrived on, and
+ * a socket that has already closed isn't tracked again.
+ */
+export const stoppableSocketTracking: MiniflareSourceTransform = {
+  marker: "reqsPerSocket.set(req.socket",
+  name: "stoppable's per-socket request tracking",
+  replacements: [
+    {
+      pattern:
+        /function onRequest\(req, res\) \{\s*reqsPerSocket\.set\(req\.socket, reqsPerSocket\.get\(req\.socket\) \+ 1\);\s*res\.once\("finish", \(\) => \{\s*const pending = reqsPerSocket\.get\(req\.socket\) - 1;\s*reqsPerSocket\.set\(req\.socket, pending\);\s*if \(stopped && pending === 0\) \{\s*req\.socket\.end\(\);\s*\}\s*\}\);\s*\}/g,
+      replace: () => `function onRequest(req, res) {
+        const socket = req.socket;
+        if (!reqsPerSocket.has(socket)) return;
+        reqsPerSocket.set(socket, reqsPerSocket.get(socket) + 1);
+        res.once("finish", () => {
+          if (!reqsPerSocket.has(socket)) return;
+          const pending = reqsPerSocket.get(socket) - 1;
+          reqsPerSocket.set(socket, pending);
+          if (stopped && pending === 0) {
+            socket.end();
+          }
+        });
+      }`,
+    },
+  ],
+};
+
 export type MiniflareSourceTransformResult = {
   applied: string[];
   /** Transforms whose target code Miniflare still has, in a shape they no longer match. */
@@ -128,10 +160,15 @@ const warn = (message: string) => process.stderr.write(`[bun-test-cloudflare] ${
  * path, so every later `require` shares the patched exports. Install after the undici and ws mocks
  * and before anything else loads Miniflare: its bundle requires its dependencies now.
  */
-export const installMiniflareSourcePatch = (enabled: { capnpArenaGrowth: boolean; proxyCallRetention: boolean }) => {
+export const installMiniflareSourcePatch = (enabled: {
+  capnpArenaGrowth: boolean;
+  proxyCallRetention: boolean;
+  stoppableSocketTracking: boolean;
+}) => {
   const transforms = [
     ...(enabled.capnpArenaGrowth ? [capnpArenaGrowth] : []),
     ...(enabled.proxyCallRetention ? [proxyCallRetention] : []),
+    ...(enabled.stoppableSocketTracking ? [stoppableSocketTracking] : []),
   ];
   if (transforms.length === 0) return;
 
