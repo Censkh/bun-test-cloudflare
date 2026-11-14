@@ -120,6 +120,57 @@ export const stoppableSocketTracking: MiniflareSourceTransform = {
   ],
 };
 
+/**
+ * Miniflare's loopback server hands each incoming request's body to a Request as a stream that reads
+ * the Node request and closes in a microtask once it ends or fails. When the body's consumer cancels
+ * while a read is pending, that read still settles, and the queued close then threw "Invalid state:
+ * Controller is already closed" with no stack, failing whichever test was running. A cancelled body
+ * now ignores its last read.
+ */
+export const loopbackBodyCancellation: MiniflareSourceTransform = {
+  marker: "function safeReadableStreamFrom(",
+  name: "the loopback request body's cancellation",
+  replacements: [
+    {
+      pattern:
+        /function safeReadableStreamFrom\(iterable\) \{\s*let (\w+);\s*return new ([\w$]+)\.ReadableStream\(\{\s*async start\(\) \{\s*\1 = iterable\[Symbol\.asyncIterator\]\(\);\s*\},(?:\s*\/\/[^\n]*)?\s*async pull\(controller\) \{\s*try \{\s*const \{ done, value \} = await \1\.next\(\);\s*if \(done\) \{\s*queueMicrotask\(\(\) => controller\.close\(\)\);\s*\} else \{\s*const buf = Buffer\.isBuffer\(value\) \? value : Buffer\.from\(value\);\s*controller\.enqueue\(new Uint8Array\(buf\)\);\s*\}\s*\} catch \{\s*queueMicrotask\(\(\) => controller\.close\(\)\);\s*\}\s*return controller\.desiredSize > 0;\s*\},\s*async cancel\(\) \{\s*await \1\.return\?\.\(\);\s*\}\s*\}\);\s*\}/g,
+      replace: (_match, iterator, web) => `function safeReadableStreamFrom(iterable) {
+  let ${iterator};
+  let ended = false;
+  const end = (controller) => queueMicrotask(() => {
+    if (ended) return;
+    ended = true;
+    controller.close();
+  });
+  return new ${web}.ReadableStream({
+    async start() {
+      ${iterator} = iterable[Symbol.asyncIterator]();
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await ${iterator}.next();
+        if (ended) return;
+        if (done) {
+          end(controller);
+        } else {
+          const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+          controller.enqueue(new Uint8Array(buf));
+        }
+      } catch {
+        end(controller);
+      }
+      return controller.desiredSize > 0;
+    },
+    async cancel() {
+      ended = true;
+      await ${iterator}.return?.();
+    }
+  });
+}`,
+    },
+  ],
+};
+
 export type MiniflareSourceTransformResult = {
   applied: string[];
   /** Transforms whose target code Miniflare still has, in a shape they no longer match. */
@@ -164,11 +215,13 @@ export const installMiniflareSourcePatch = (enabled: {
   capnpArenaGrowth: boolean;
   proxyCallRetention: boolean;
   stoppableSocketTracking: boolean;
+  loopbackBodyCancellation: boolean;
 }) => {
   const transforms = [
     ...(enabled.capnpArenaGrowth ? [capnpArenaGrowth] : []),
     ...(enabled.proxyCallRetention ? [proxyCallRetention] : []),
     ...(enabled.stoppableSocketTracking ? [stoppableSocketTracking] : []),
+    ...(enabled.loopbackBodyCancellation ? [loopbackBodyCancellation] : []),
   ];
   if (transforms.length === 0) return;
 

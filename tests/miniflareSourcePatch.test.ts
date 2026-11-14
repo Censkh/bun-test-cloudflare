@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   applyMiniflareSourceTransforms,
   capnpArenaGrowth,
+  loopbackBodyCancellation,
   proxyCallRetention,
   stoppableSocketTracking,
 } from "../src/patches/MiniflareSourcePatch";
@@ -36,11 +37,13 @@ test("the Miniflare source transforms fit the installed Miniflare", () => {
     capnpArenaGrowth,
     proxyCallRetention,
     stoppableSocketTracking,
+    loopbackBodyCancellation,
   ]);
 
   expect(unmatched).toEqual([]);
   expect(applied).toContain(proxyCallRetention.name);
   expect(applied).toContain(stoppableSocketTracking.name);
+  expect(applied).toContain(loopbackBodyCancellation.name);
 });
 
 test("capnp's clamped arena growth doubles the buffer instead", () => {
@@ -133,6 +136,56 @@ test("stopping Miniflare's loopback server survives a request whose socket Bun d
     expect(uncaught).toEqual([]);
     expect(open.ended).toBeGreaterThan(0);
     expect(detached.ended).toBe(0);
+  } finally {
+    process.off("uncaughtException", recordUncaught);
+  }
+});
+
+/** Miniflare's own reader of loopback request bodies, with `transforms` applied. */
+const installedLoopbackBodyStream = (transforms: Parameters<typeof applyMiniflareSourceTransforms>[1]) => {
+  const source = installedMiniflareSource();
+  const start = source.indexOf("function safeReadableStreamFrom(");
+  const end = source.indexOf("\n  });\n}", start) + "\n  });\n}".length;
+  const { source: patched } = applyMiniflareSourceTransforms(source.slice(start, end), transforms);
+  const web = /return new ([\w$]+)\.ReadableStream\(/.exec(patched)![1];
+  return new Function(web, `${patched}\nreturn safeReadableStreamFrom;`)(require("node:stream/web")) as (
+    iterable: AsyncIterable<Uint8Array>,
+  ) => ReadableStream<Uint8Array>;
+};
+
+test("a loopback request body its consumer cancels during a read stays cancelled when the read ends", async () => {
+  const uncaught: unknown[] = [];
+  const recordUncaught = (error: unknown) => uncaught.push(error);
+  process.on("uncaughtException", recordUncaught);
+  try {
+    const safeReadableStreamFrom = installedLoopbackBodyStream([loopbackBodyCancellation]);
+    let endRead: (result: IteratorResult<Uint8Array>) => void = () => {};
+    const { promise: reading, resolve: startedReading } = Promise.withResolvers<void>();
+    let returned = 0;
+    const request: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () =>
+          new Promise((resolve) => {
+            endRead = resolve;
+            startedReading();
+          }),
+        return: async () => {
+          returned += 1;
+          return { done: true, value: undefined };
+        },
+      }),
+    };
+    const reader = safeReadableStreamFrom(request).getReader();
+    const read = reader.read();
+    await reading;
+    await reader.cancel();
+    // The Node request ends after the consumer has gone.
+    endRead({ done: true, value: undefined });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(uncaught).toEqual([]);
+    expect(await read).toEqual({ done: true, value: undefined });
+    expect(returned).toBe(1);
   } finally {
     process.off("uncaughtException", recordUncaught);
   }

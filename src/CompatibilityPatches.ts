@@ -66,6 +66,9 @@ export const COMPATABILITY_PATCHES = {
   // Bun detaches req.socket once a response is written, which breaks the socket tracking of the
   // stoppable server Miniflare disposes its loopback server with (MiniflareSourcePatch.ts).
   "miniflare-stoppable-socket-tracking": { id: "miniflare-stoppable-socket-tracking", disabledFromVersion: null },
+  // Miniflare's loopback request bodies close after a read that settles once their consumer cancelled
+  // (MiniflareSourcePatch.ts).
+  "miniflare-loopback-body-cancellation": { id: "miniflare-loopback-body-cancellation", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },
