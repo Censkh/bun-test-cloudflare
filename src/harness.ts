@@ -846,17 +846,23 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
   // A harness made with the same config as one whose scope has ended (a later test file calling the
   // same shared factory) takes over its pool: its runtimes are reset between files as they are
-  // between tests, rather than every file starting workerd again.
-  const reuseKey = keepsServerAlive ? harnessReuseKey(config) : undefined;
+  // between tests, rather than every file starting workerd again. The config is compared when the
+  // pool is needed, as its runtimes read it then: a test may fill in a value (a URL it starts) after
+  // creating the harness.
+  let orchestratorKey: string | undefined;
   const getOrchestrator = () => {
     // The run-wide cleanup may have closed it while this harness, from a module later files share,
     // still held it.
     if (orchestrator?.closed) orchestrator = undefined;
-    return (orchestrator ??=
-      takeParkedOrchestrator<TWorkers>(reuseKey) ??
-      (keepsServerAlive
-        ? new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize)
-        : new InlineServerOrchestrator(createRun)));
+    if (!orchestrator) {
+      orchestratorKey = keepsServerAlive ? harnessReuseKey(config) : undefined;
+      orchestrator =
+        takeParkedOrchestrator<TWorkers>(orchestratorKey) ??
+        (keepsServerAlive
+          ? new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize)
+          : new InlineServerOrchestrator(createRun));
+    }
+    return orchestrator;
   };
   // Bun keeps one process, and one module cache, across all the test files it runs, so a pool
   // otherwise lives until the whole run ends: every harness a file, describe block or test creates
@@ -868,7 +874,7 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   onCreatingScopeEnd(async () => {
     const current = orchestrator;
     orchestrator = undefined;
-    if (current && !parkOrchestrator(reuseKey, current)) await current.close();
+    if (current && !parkOrchestrator(orchestratorKey, current)) await current.close();
   });
 
   const harness: CloudflareHarness<TWorkers> = {

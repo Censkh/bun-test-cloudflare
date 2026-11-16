@@ -122,6 +122,20 @@ describe("Cloudflare harness fixture", () => {
   }
 
   fixture.test(
+    "a later file whose harness config differs once its test fills it in starts a runtime of its own",
+    ({ run }) => {
+      const result = run({
+        testArgs: ["--parallel=1", "--no-isolate"],
+        fixtureTests: ["./varsA.fixture.ts", "./varsB.fixture.ts"],
+        timeoutMs: 30_000,
+        processTimeoutMs: 40_000,
+      });
+      result.expectStatusCode(0);
+    },
+    45_000,
+  );
+
+  fixture.test(
     "keeps a proxy alive for its call and lets it go afterwards",
     ({ run }) => {
       const result = run({
