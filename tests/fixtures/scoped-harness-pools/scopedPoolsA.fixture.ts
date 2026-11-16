@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { createHarness, expectWorking, sharedHarness } from "./harness";
 import { settledWorkerdCount } from "./workerdProcesses";
 
-// Bun runs every file in one process, so a pool that outlived the scope that created its harness
-// would keep its workerd running through every later file.
+// Bun runs every file in one process, so a pool that outlived the test or block that created its
+// harness would keep its workerd running through the rest of the run. Only a file's own pool is
+// kept, for the next file (scopedPoolsB).
 
 test("a harness created in a test runs", async () => {
   await expectWorking(createHarness());

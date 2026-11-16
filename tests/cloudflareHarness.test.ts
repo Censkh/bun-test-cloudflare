@@ -63,6 +63,64 @@ describe("Cloudflare harness fixture", () => {
     45_000,
   );
 
+  /** Two files using one shared harness, run as `testArgs` say: what started, and what is left running. */
+  const runSharedHarnessFiles = (run: Parameters<Parameters<typeof fixture.test>[1]>[0]["run"], testArgs: string[]) => {
+    const runtimeStartLog = path.join(fixtureRoot, "node_modules/.btcf/runtime-starts.log");
+    const workerdPidLog = path.join(fixtureRoot, "node_modules/.btcf/workerd-pids.log");
+    rmSync(runtimeStartLog, { force: true });
+    rmSync(workerdPidLog, { force: true });
+    const result = run({
+      env: { BTCF_RUNTIME_START_LOG: runtimeStartLog, BTCF_WORKERD_PID_LOG: workerdPidLog },
+      testArgs: [...testArgs, "--preload", "./runtimeStartLog.ts"],
+      fixtureTests: ["./sharedBuild.fixture.ts", "./sharedRuntime.fixture.ts"],
+      timeoutMs: 30_000,
+      processTimeoutMs: 40_000,
+    });
+    result.expectStatusCode(0);
+    const lines = (file: string) => readFileSync(file, "utf8").split("\n").filter(Boolean);
+    const workerdPids = lines(workerdPidLog).map(Number);
+    const isRunning = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // A runtime the run left behind is stopped by its watchdog, which checks every second.
+    const deadline = Date.now() + 5_000;
+    while (workerdPids.some(isRunning) && Date.now() < deadline) Bun.sleepSync(100);
+    return { runtimeStarts: lines(runtimeStartLog).length, workerdPids, leftRunning: workerdPids.filter(isRunning) };
+  };
+
+  // Every way Bun can run the files: in one process or in workers, with each file in a global of
+  // its own or sharing one. Files that share a global share a runtime; nothing outlives the run.
+  for (const { mode, testArgs, runtimeStarts } of [
+    { mode: "in one process (Bun's default)", testArgs: [], runtimeStarts: 1 },
+    { mode: "in one process with --isolate", testArgs: ["--isolate"], runtimeStarts: 2 },
+    { mode: "in one worker", testArgs: ["--parallel=1"], runtimeStarts: 2 },
+    { mode: "in one worker with --no-isolate", testArgs: ["--parallel=1", "--no-isolate"], runtimeStarts: 1 },
+    { mode: "in two workers", testArgs: ["--parallel=2", "--parallel-delay=0"], runtimeStarts: 2 },
+    {
+      mode: "in two workers with --no-isolate",
+      testArgs: ["--parallel=2", "--parallel-delay=0", "--no-isolate"],
+      // One per worker that ran a file: Bun may hand both files to one worker.
+      runtimeStarts: [1, 2],
+    },
+  ]) {
+    fixture.test(
+      `test files run ${mode} start ${Array.isArray(runtimeStarts) ? "a runtime per worker" : runtimeStarts === 1 ? "one runtime between them" : "a runtime each"} and leave no workerd running`,
+      ({ run }) => {
+        const result = runSharedHarnessFiles(run, testArgs);
+        if (Array.isArray(runtimeStarts)) expect(runtimeStarts).toContain(result.runtimeStarts);
+        else expect(result.runtimeStarts).toBe(runtimeStarts);
+        expect(result.workerdPids.length).toBeGreaterThanOrEqual(result.runtimeStarts);
+        expect(result.leftRunning).toEqual([]);
+      },
+      45_000,
+    );
+  }
+
   fixture.test(
     "keeps a proxy alive for its call and lets it go afterwards",
     ({ run }) => {

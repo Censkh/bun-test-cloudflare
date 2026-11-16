@@ -1,6 +1,7 @@
 import childProcess from "node:child_process";
 import path from "node:path";
 import { shouldInstallCompatibilityPatch } from "../CompatibilityPatches";
+import { reapWithThisProcess } from "../WorkerdReaper";
 import { trackSpawnedWorkerdProcess } from "../WorkerRuntimeCrash";
 
 type UnrefableStream = {
@@ -50,7 +51,8 @@ let installed = false;
 
 /**
  * Wraps child_process.spawn for workerd: tracks each runtime for crash detection (always, since a
- * run must not wait forever on a dead runtime) and applies the enabled stdio compatibility patches.
+ * run must not wait forever on a dead runtime), has it stopped if this process ends without
+ * stopping it (`WorkerdReaper`), and applies the enabled stdio compatibility patches.
  */
 export const installWorkerdChildProcessPatch = () => {
   // Another patch may wrap spawn after this one, so the flag can't live on the function.
@@ -71,6 +73,7 @@ export const installWorkerdChildProcessPatch = () => {
 
     if (isWorkerdServe(command, args)) {
       trackSpawnedWorkerdProcess(child);
+      reapWithThisProcess(child);
       patchWorkerdChildProcess(child);
     }
 

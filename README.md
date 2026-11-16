@@ -107,7 +107,7 @@ test("calls the backend worker", async () => {
 });
 ```
 
-`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool closes, stopping its workerd processes, when the test, `describe` block or file that created the harness ends; a harness used again after that, such as one a shared module creates while the first test file imports it, starts a new pool on its next run. A harness created in a `beforeAll` hook keeps its pool until the whole run ends, since Bun would end a scope tied to that hook before the tests it prepares for. Scope tracking needs the `bun-test-cloudflare/setup` preload. While another harness takes leases, a harness also closes the prewarmed servers nothing is using, so only the harness in use keeps workerd processes ready; runs in progress are left alone. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
+`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool closes, stopping its workerd processes, when the test, `describe` block or file that created the harness ends; a harness used again after that, such as one a shared module creates while the first test file imports it, starts a new pool on its next run. When test files share one global, a file's pool is kept for the next file instead (see [Reusing runtimes across test files](#reusing-runtimes-across-test-files)). A harness created in a `beforeAll` hook keeps its pool until the whole run ends, since Bun would end a scope tied to that hook before the tests it prepares for. Scope tracking needs the `bun-test-cloudflare/setup` preload. While another harness takes leases, a harness also closes the prewarmed servers nothing is using, so only the harness in use keeps workerd processes ready; runs in progress are left alone. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
 
 ### When the runtime dies
 
@@ -150,6 +150,20 @@ test("uploads a PNG", async () => {
 ```
 
 Runs in a lease never overlap. Each one waits for the background work it started and fails if a `waitUntil` promise it started rejected. After `release()`, the slot is reset like any other before it is used again. Keep `run()` for tests that need clean globals or storage.
+
+### Reusing runtimes across test files
+
+Each test file otherwise starts its own workerd runtime. When the files a Bun process runs share one global (Bun's default without `--parallel`, or `bun test --parallel --no-isolate`), the pool of a harness created for a whole file outlives that file: the next file that creates a harness with the same config, such as one from a shared factory, takes it over, so a process starts workerd once rather than once per file: each file after the first saves a workerd start (most of a second) and the runtime the pool prewarmed beside it. The runtime is reset between files exactly as between tests, so each file still starts from clean Worker globals and storage.
+
+```sh
+bun test --parallel --no-isolate
+```
+
+Nothing needs configuring. A harness matches only one made from the same config with the same hook functions, so a file with a config of its own starts its own runtime. A harness a test or `describe` block created still stops its workerd when that scope ends; only a file's pool is kept. Isolated files (`--isolate`, or `--parallel` alone) can't see each other's pools, so each closes its own as before.
+
+`--no-isolate` keeps Bun's own state across files too: a file's `mock.module()`, `spyOn()`, globals and `process.env` changes are visible to the files after it in that worker. Use it for suites whose files undo what they change.
+
+Bun ends a `--parallel` worker without running its exit hooks once its last file is done, and an interrupted run is killed, so every workerd a test process starts is also listed for a detached watchdog. When the process has gone, the watchdog stops any of its workerd processes still running.
 
 ## Serve A Worker Over HTTP
 

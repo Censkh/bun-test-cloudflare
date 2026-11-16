@@ -36,6 +36,8 @@ import {
 import {
   closePrewarmedServerOrchestrators,
   PrewarmedServerOrchestrator,
+  parkOrchestrator,
+  takeParkedOrchestrator,
   WARM_WORKERD_POOL_SIZE,
 } from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrchestrator";
@@ -752,6 +754,27 @@ const buildWorkers = (plans: WorkerBuildPlan[]): WorkerBuildResult[] => {
   }
 };
 
+const functionIds = new WeakMap<Function, number>();
+let nextFunctionId = 0;
+
+/**
+ * What decides a harness's runtimes: its config, with each function (an `events` hook) by identity,
+ * so only a harness made from the same module-level hooks matches. Undefined when the config can't
+ * be compared (it holds a cycle).
+ */
+const harnessReuseKey = (config: unknown) => {
+  try {
+    return JSON.stringify(config, (_key, value: unknown) => {
+      if (typeof value !== "function") return value;
+      let id = functionIds.get(value);
+      if (id === undefined) functionIds.set(value, (id = nextFunctionId++));
+      return `function#${id}`;
+    });
+  } catch {
+    return undefined;
+  }
+};
+
 export const createCloudflareHarness = <const TWorkers extends Record<string, CloudflareWorkerConfig>>(
   config: CloudflareHarnessConfig<TWorkers>,
 ): CloudflareHarness<TWorkers> => {
@@ -820,12 +843,21 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   // The Workers are built now, so building never counts against a test's timeout, but workerd starts
   // on the first run: a module can create a harness that a test file importing it never runs.
   let orchestrator: ServerOrchestrator<TWorkers> | undefined;
-  const getOrchestrator = () =>
-    (orchestrator ??=
-      process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM === "1"
-        ? new InlineServerOrchestrator(createRun)
-        : new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize));
   const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
+  // A harness made with the same config as one whose scope has ended (a later test file calling the
+  // same shared factory) takes over its pool: its runtimes are reset between files as they are
+  // between tests, rather than every file starting workerd again.
+  const reuseKey = keepsServerAlive ? harnessReuseKey(config) : undefined;
+  const getOrchestrator = () => {
+    // The run-wide cleanup may have closed it while this harness, from a module later files share,
+    // still held it.
+    if (orchestrator?.closed) orchestrator = undefined;
+    return (orchestrator ??=
+      takeParkedOrchestrator<TWorkers>(reuseKey) ??
+      (keepsServerAlive
+        ? new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize)
+        : new InlineServerOrchestrator(createRun)));
+  };
   // Bun keeps one process, and one module cache, across all the test files it runs, so a pool
   // otherwise lives until the whole run ends: every harness a file, describe block or test creates
   // would keep its workerd processes running through every later file. The pool closes when the
@@ -836,7 +868,7 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   onCreatingScopeEnd(async () => {
     const current = orchestrator;
     orchestrator = undefined;
-    await current?.close();
+    if (current && !parkOrchestrator(reuseKey, current)) await current.close();
   });
 
   const harness: CloudflareHarness<TWorkers> = {

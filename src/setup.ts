@@ -5,7 +5,7 @@ import {
   shouldInstallCompatibilityPatch,
   shouldInstallCompatibilityPatchGroup,
 } from "./CompatibilityPatches";
-import { closePrewarmedServerOrchestrators } from "./PrewarmedServerOrchestrator";
+import { closePrewarmedServerOrchestrators, releaseRuntimesParkedInThisFile } from "./PrewarmedServerOrchestrator";
 import { installBrowserRenderingPatch } from "./patches/BrowserRenderingPatch";
 import { installChildProcessExtraFdPatch } from "./patches/ChildProcessExtraFdPatch";
 import { installCloudflareWorkersPatch } from "./patches/CloudflareWorkersPatch";
@@ -89,12 +89,15 @@ if (shouldInstallCompatibilityPatch("undici")) {
   installCompatibilityPatch("wrangler-bun-detection", installWranglerBunDetectionPatch);
 }
 
-beforeEach(markTestStarted);
+beforeEach(() => {
+  markTestStarted();
+  releaseRuntimesParkedInThisFile();
+});
 afterEach(markTestFinished);
 
 afterAll(async () => {
   try {
-    await closePrewarmedServerOrchestrators();
+    await closePrewarmedServerOrchestrators({ endOfFile: true });
   } finally {
     stopWranglerEsbuildService();
   }

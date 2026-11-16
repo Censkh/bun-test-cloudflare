@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { HarnessRun } from "./HarnessRun";
 import { stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
 import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
@@ -79,7 +80,91 @@ const logDiscardedWarmRun = (phase: string, error: unknown) => {
   console.error(error);
 };
 
-export const closePrewarmedServerOrchestrators = async () => {
+/**
+ * Pools whose harness's scope ended, by the harness's reuse key: at most one each, until a harness
+ * with the same key takes it over. They stay in the registry, so the run-wide close below closes
+ * them, and another harness's lease closes their idle runtimes meanwhile.
+ */
+const parkedOrchestrators = new Map<string, ServerOrchestrator<any>>();
+/** The test file each parked pool was parked in (`Bun.main` is the file whose tests are running). */
+const parkedInFile = new Map<ServerOrchestrator<any>, string>();
+
+export const takeParkedOrchestrator = <TWorkers extends Record<string, any>>(key: string | undefined) => {
+  if (key === undefined) return undefined;
+  const parked = parkedOrchestrators.get(key) as ServerOrchestrator<TWorkers> | undefined;
+  parkedOrchestrators.delete(key);
+  if (parked) parkedInFile.delete(parked);
+  return parked?.closed ? undefined : parked;
+};
+
+/** Keeps a pool for a later harness with the same key; returns false when it should close instead. */
+export const parkOrchestrator = (key: string | undefined, orchestrator: ServerOrchestrator<any>) => {
+  if (key === undefined || orchestrator.closed || !orchestrator.releaseIdleRuns) return false;
+  if (parkedOrchestrators.get(key)?.closed === false) return false;
+  parkedOrchestrators.set(key, orchestrator);
+  parkedInFile.set(orchestrator, Bun.main);
+  return true;
+};
+
+/**
+ * Before each test: a pool parked in this file was parked when a test or `describe` block ended,
+ * so its runtimes stop now, as that scope's would; the pool itself stays for a harness like it,
+ * which starts runtimes again. Only a pool parked as a file ended keeps its runtimes running, for
+ * the next file.
+ */
+export const releaseRuntimesParkedInThisFile = () => {
+  for (const [orchestrator, file] of parkedInFile) {
+    if (file !== Bun.main) continue;
+    parkedInFile.delete(orchestrator);
+    orchestrator.releaseIdleRuns?.();
+  }
+};
+
+/**
+ * Whether the setup preload's `afterAll` ends one of several test files that share one global, so
+ * the next file can take over a pool parked in it: in a `bun test --parallel --no-isolate` worker.
+ * Elsewhere it ends the run (Bun's default, which shares one global, and `--parallel=1`, which
+ * runs in-process) or an isolated file whose global the next file can't see (`--isolate`, or a
+ * `--parallel` worker without `--no-isolate`). Nothing in JavaScript tells these apart (Bun
+ * rewrites `process.argv`, and an isolated file gets its own `process.env`), so it is read from
+ * the process's own command line, where Bun passes `--test-worker` and `--no-isolate` to its
+ * workers. Taken as not when the command line can't be read.
+ */
+export const preloadEndsSharedFile = (commandLine: string | null = readOwnCommandLine()) => {
+  if (commandLine === null) return false;
+  const args = commandLine.split(/\s+/);
+  return args.includes("--test-worker") && args.includes("--no-isolate");
+};
+
+let ownCommandLine: string | null | undefined;
+const readOwnCommandLine = () => {
+  if (ownCommandLine === undefined) {
+    try {
+      ownCommandLine =
+        process.platform === "linux"
+          ? readFileSync("/proc/self/cmdline", "utf8").split("\0").join(" ")
+          : Bun.spawnSync(["ps", "-o", "args=", "-p", String(process.pid)])
+              .stdout.toString()
+              .trim() || null;
+    } catch {
+      ownCommandLine = null;
+    }
+  }
+  return ownCommandLine;
+};
+
+/**
+ * Closes the pools the run, or a test file, leaves running: all of them, or, at the end of a file
+ * whose global the next one shares, all but the parked ones it can take over (`WorkerdReaper`
+ * stops them if the process ends first).
+ */
+export const closePrewarmedServerOrchestrators = async ({ endOfFile = false } = {}) => {
+  const keepParked = endOfFile && preloadEndsSharedFile();
+  const parked = new Set(parkedOrchestrators.values());
+  if (!keepParked) {
+    parkedOrchestrators.clear();
+    parkedInFile.clear();
+  }
   const registry = globalThis.__bunTestCloudflarePrewarmedServerOrchestrators;
   if (!registry || registry.closing) {
     return;
@@ -87,7 +172,11 @@ export const closePrewarmedServerOrchestrators = async () => {
 
   registry.closing = true;
   try {
-    await Promise.allSettled(Array.from(registry.orchestrators, (orchestrator) => orchestrator.close()));
+    await Promise.allSettled(
+      Array.from(registry.orchestrators)
+        .filter((orchestrator) => !keepParked || !parked.has(orchestrator))
+        .map((orchestrator) => orchestrator.close()),
+    );
   } finally {
     registry.closing = false;
     stopWranglerEsbuildService();
@@ -100,6 +189,9 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
   // Runs that lost a start race, closing once their own start settles
   readonly #closing = new Set<Promise<void>>();
   #closed = false;
+  get closed() {
+    return this.#closed;
+  }
   // Set while another harness holds the leases, so the pool stops refilling until this one is used.
   #idle = false;
 
@@ -333,6 +425,9 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
 export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> implements ServerOrchestrator<TWorkers> {
   #closed = false;
+  get closed() {
+    return this.#closed;
+  }
   #leaseTail = Promise.resolve();
   #run: HarnessRun<TWorkers> | undefined;
 
