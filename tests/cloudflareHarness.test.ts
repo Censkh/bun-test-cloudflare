@@ -1,11 +1,15 @@
 import { describe, expect } from "bun:test";
 import { readFileSync, rmSync } from "node:fs";
 import path from "node:path";
+import { getWorkerBuildCacheRoot } from "../src/WorkerBuildCache";
 import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
 const fixtureRoot = fixturePath(import.meta.dir, "cloudflare-harness");
 
 const fixture = bunFixtureTest(fixtureRoot);
+
+/** Builds kept from earlier runs, so a test that watches the build processes sees them build. */
+const forgetCachedBuilds = () => rmSync(getWorkerBuildCacheRoot(fixtureRoot), { force: true, recursive: true });
 
 describe("Cloudflare harness fixture", () => {
   fixture.test(
@@ -20,6 +24,7 @@ describe("Cloudflare harness fixture", () => {
   fixture.test(
     "builds independent Workers concurrently",
     ({ run }) => {
+      forgetCachedBuilds();
       const barrier = path.join(fixtureRoot, "node_modules/.btcf/build-barrier");
       rmSync(barrier, { force: true, recursive: true });
       const result = run({
@@ -41,6 +46,7 @@ describe("Cloudflare harness fixture", () => {
   fixture.test(
     "reuses a finished build in later test files without starting a build process",
     ({ run }) => {
+      forgetCachedBuilds();
       const buildProcessLog = path.join(fixtureRoot, "node_modules/.btcf/build-processes.log");
       rmSync(buildProcessLog, { force: true });
       const result = run({
@@ -73,6 +79,7 @@ describe("Cloudflare harness fixture", () => {
   fixture.test(
     "shares concurrent builds across Bun test workers",
     ({ run }) => {
+      forgetCachedBuilds();
       const barrier = path.join(fixtureRoot, "node_modules/.btcf/shared-build-barrier");
       rmSync(barrier, { force: true, recursive: true });
       const result = run({
@@ -95,6 +102,7 @@ describe("Cloudflare harness fixture", () => {
   fixture.test(
     "shares a concurrent build failure across Bun test workers",
     ({ run }) => {
+      forgetCachedBuilds();
       const barrier = path.join(fixtureRoot, "node_modules/.btcf/failed-build-barrier");
       rmSync(barrier, { force: true, recursive: true });
       const result = run({

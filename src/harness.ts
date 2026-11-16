@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -39,6 +40,7 @@ import {
 } from "./PrewarmedServerOrchestrator";
 import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrchestrator";
 import { onCreatingScopeEnd } from "./TestScope";
+import { getWorkerBuildCacheDir, restoreCachedBuild, storeBuild } from "./WorkerBuildCache";
 import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
 import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
@@ -357,10 +359,21 @@ const runWranglerDryRun = (
   env: string | undefined,
   deadline: number,
   cwd: string,
+  metafilePath: string,
 ) => {
   mkdirSync(outdir, { recursive: true });
   const wranglerBinPath = getWranglerBinPath();
-  const args = [wranglerBinPath, "deploy", "--dry-run", "--outdir", outdir, "--config", configPath];
+  const args = [
+    wranglerBinPath,
+    "deploy",
+    "--dry-run",
+    "--outdir",
+    outdir,
+    "--config",
+    configPath,
+    "--metafile",
+    metafilePath,
+  ];
   if (env) {
     args.push("--env", env);
   }
@@ -432,6 +445,58 @@ const createWorkerBuildPlan = (
   };
 };
 
+/** What else decides a build's output besides its plan: Wrangler's version and the patches applied to it. */
+let buildToolKey: string | undefined;
+const getBuildToolKey = () => {
+  if (buildToolKey !== undefined) return buildToolKey;
+  const hash = crypto.createHash("sha256");
+  const wranglerPackage = path.join(path.dirname(getWranglerBinPath()), "..", "package.json");
+  if (existsSync(wranglerPackage)) hash.update(readFileSync(wranglerPackage));
+  const patches = [path.join(import.meta.dir, "wranglerPatches.ts"), path.join(import.meta.dir, "patches")];
+  const addFiles = (file: string) => {
+    if (!existsSync(file)) return;
+    if (statSync(file).isDirectory()) {
+      for (const entry of readdirSync(file).sort()) addFiles(path.join(file, entry));
+    } else hash.update(file).update(readFileSync(file));
+  };
+  for (const file of patches) addFiles(file);
+  buildToolKey = hash.digest("hex");
+  return buildToolKey;
+};
+
+/**
+ * Finishes this run's build of `plan` from the cache of earlier runs (WorkerBuildCache) when its inputs
+ * are unchanged, without starting Wrangler; `undefined` when there is none to use. Loading Wrangler, as
+ * a build process does, takes about a second, which a run that only restores builds skips.
+ */
+export const restoreWorkerBuild = (plan: WorkerBuildPlan): WorkerBuildResult | undefined => {
+  const deadline = Date.now() + buildInitializationTimeoutMs;
+  return withBuildLock(plan.outdir, deadline, () => {
+    const existingStatus = readBuildStatus(plan.statusPath);
+    if (
+      existingStatus?.buildKey === plan.buildKey &&
+      existingStatus.state === "success" &&
+      existsSync(existingStatus.builtMain)
+    )
+      return { built: false, builtMain: existingStatus.builtMain };
+    const cacheDir = getWorkerBuildCacheDir(plan.buildBaseDirectory, plan.buildKey, getBuildToolKey());
+    if (!restoreCachedBuild(cacheDir, plan.outdir)) return undefined;
+    return finishWorkerBuild(plan);
+  });
+};
+
+/** A dry run's output in `plan.outdir` made ready to serve: its main module named, its additional modules beside it. */
+const finishWorkerBuild = (plan: WorkerBuildPlan): WorkerBuildResult => {
+  const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
+  copyAdditionalModules({
+    outdir: plan.outdir,
+    rules: plan.config.rules,
+    sourceRoots: plan.additionalModuleSourceRoots,
+  });
+  writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, builtMain, state: "success" });
+  return { built: true, builtMain };
+};
+
 export const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
   const deadline = Date.now() + buildInitializationTimeoutMs;
   removeFinishedRunBuilds(plan.buildBaseDirectory, isProcessAlive);
@@ -451,16 +516,15 @@ export const buildWorkerOnce = (plan: WorkerBuildPlan): WorkerBuildResult => {
     mkdirSync(plan.outdir, { recursive: true });
     writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, ownerPid: process.pid, state: "building" });
     try {
-      const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
-      runWranglerDryRun(testConfigPath, plan.outdir, plan.env, deadline, plan.buildCwd);
-      const builtMain = normalizeBuiltMain(plan.outdir, findBuiltMain(plan.outdir, plan.config.main));
-      copyAdditionalModules({
-        outdir: plan.outdir,
-        rules: plan.config.rules,
-        sourceRoots: plan.additionalModuleSourceRoots,
-      });
-      writeBuildStatus(plan.statusPath, { buildKey: plan.buildKey, builtMain, state: "success" });
-      return { built: true, builtMain };
+      // A build an earlier run made from the same inputs is reused (WorkerBuildCache).
+      const cacheDir = getWorkerBuildCacheDir(plan.buildBaseDirectory, plan.buildKey, getBuildToolKey());
+      if (!restoreCachedBuild(cacheDir, plan.outdir)) {
+        const testConfigPath = writeResolvedConfig(plan.outdir, withDryRunBuildConfig(plan.testConfig));
+        const metafilePath = `${plan.outdir}.meta.json`;
+        runWranglerDryRun(testConfigPath, plan.outdir, plan.env, deadline, plan.buildCwd, metafilePath);
+        storeBuild(cacheDir, plan.outdir, metafilePath, [plan.buildCwd, path.dirname(testConfigPath)]);
+      }
+      return finishWorkerBuild(plan);
     } catch (error) {
       writeBuildStatus(plan.statusPath, {
         buildKey: plan.buildKey,
@@ -653,6 +717,12 @@ const buildWorkers = (plans: WorkerBuildPlan[]): WorkerBuildResult[] => {
   const finished = plans.map(readFinishedBuild);
   if (finished.every((result) => result !== undefined)) {
     return finished as WorkerBuildResult[];
+  }
+  // Or restore them from an earlier run's builds here, when every one is cached, rather than starting a
+  // build process for it.
+  const restored = plans.map((plan, index) => finished[index] ?? restoreWorkerBuild(plan));
+  if (restored.every((result) => result !== undefined)) {
+    return restored as WorkerBuildResult[];
   }
   const directory = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-builds-"));
   try {
