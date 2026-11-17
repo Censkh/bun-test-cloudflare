@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import crypto from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -52,5 +53,47 @@ test("a build with no inputs to check is never cached", () => {
   const empty = path.join(root, "empty-meta.json");
   writeFileSync(empty, JSON.stringify({ inputs: { "wrangler:modules-watch": {} } }));
   storeBuild(cacheDir, outdir, empty, [root]);
+  expect(restoreCachedBuild(cacheDir, path.join(root, "next-run"))).toBe(false);
+});
+
+/** A build whose worker imports a Wasm module, which Wrangler collects outside esbuild's inputs. */
+const builtWithModule = (importer = 'import wasm from "./lib/reader.wasm?module";\nexport default { wasm };\n') => {
+  const project = built();
+  mkdirSync(path.join(project.root, "lib"));
+  const module = path.join(project.root, "lib/reader.wasm");
+  writeFileSync(module, new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+  writeFileSync(path.join(project.root, "worker.ts"), importer);
+  const hash = crypto.createHash("sha1").update(readFileSync(module)).digest("hex");
+  writeFileSync(
+    project.metafile,
+    JSON.stringify({
+      inputs: {
+        "worker.ts": { imports: [{ path: `./${hash}-reader.wasm`, kind: "import-statement", external: true }] },
+      },
+    }),
+  );
+  return { ...project, module };
+};
+
+test("a build is kept while the modules Wrangler collected are unchanged, and built again when one changes", () => {
+  const { root, outdir, metafile, cacheDir, module } = builtWithModule();
+  storeBuild(cacheDir, outdir, metafile, [root]);
+  expect(restoreCachedBuild(cacheDir, path.join(root, "unchanged"))).toBe(true);
+  writeFileSync(module, new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1]));
+  expect(restoreCachedBuild(cacheDir, path.join(root, "changed"))).toBe(false);
+});
+
+test("a build with a collected module that can't be traced to its file is never cached", () => {
+  const { root, outdir, metafile, cacheDir } = builtWithModule("export default {};\n");
+  storeBuild(cacheDir, outdir, metafile, [root]);
+  expect(restoreCachedBuild(cacheDir, path.join(root, "next-run"))).toBe(false);
+});
+
+test("an entry written before collected modules were recorded is built again", () => {
+  const { root, outdir, metafile, cacheDir } = built();
+  storeBuild(cacheDir, outdir, metafile, [root]);
+  const manifest = path.join(cacheDir, "manifest.json");
+  const { inputs } = JSON.parse(readFileSync(manifest, "utf8")) as { inputs: unknown };
+  writeFileSync(manifest, JSON.stringify({ inputs }));
   expect(restoreCachedBuild(cacheDir, path.join(root, "next-run"))).toBe(false);
 });
