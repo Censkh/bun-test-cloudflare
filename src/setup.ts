@@ -21,7 +21,7 @@ import { installWorkerThreadsPatch } from "./patches/WorkerThreadsPatch";
 import { installWranglerBunDetectionPatch } from "./patches/WranglerBunDetectionPatch";
 import { installWranglerEsbuildPatch, stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
 import { installWsCloseHandshakePatch } from "./patches/WsCloseHandshakePatch";
-import { markTestFinished, markTestStarted } from "./TestScope";
+import { markTestFinished, markTestStarted, TEARDOWN_TIMEOUT_MS } from "./TestScope";
 
 const installCompatibilityPatch = (patchName: CompatibilityPatchName, install: () => void) => {
   if (shouldInstallCompatibilityPatch(patchName)) {
@@ -101,4 +101,4 @@ afterAll(async () => {
   } finally {
     stopWranglerEsbuildService();
   }
-});
+}, TEARDOWN_TIMEOUT_MS);

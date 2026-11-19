@@ -12,6 +12,13 @@ export const markTestFinished = () => {
 };
 
 /**
+ * How long a scope's teardown may take. Closing runtimes can outlast Bun's 5 s hook limit on a
+ * loaded machine, as when a crashed runtime is being restarted, which failed a file whose tests
+ * had all passed.
+ */
+export const TEARDOWN_TIMEOUT_MS = 60_000;
+
+/**
  * Runs `callback` when the scope that is creating something ends: a test (or its `beforeEach`)
  * when called inside one, otherwise the describe block or file being collected. Bun runs an
  * `afterAll` registered inside a `beforeAll`, `afterAll` or `afterEach` as soon as that hook
@@ -28,7 +35,7 @@ export const onCreatingScopeEnd = (callback: () => Promise<void>): boolean => {
     }
   }
   try {
-    afterAll(callback);
+    afterAll(callback, TEARDOWN_TIMEOUT_MS);
     return true;
   } catch {
     return false;
