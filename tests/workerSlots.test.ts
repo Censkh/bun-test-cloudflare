@@ -21,12 +21,13 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
   ).toBeTrue();
 });
 
-test("isolated Worker slots accept queues, rate limits and bindings every slot can share", () => {
+test("isolated Worker slots accept queues, rate limits, static assets and bindings every slot can share", () => {
   // Bindings as Wrangler converts them; checked directly so a mocked Wrangler elsewhere in the run can't
   // change the result.
   const workerNames = new Set(["worker"]);
   for (const binding of [
     { dataset: "events", type: "analytics_engine" },
+    { directory: "./assets", type: "assets" },
     { type: "browser" },
     { id: "hyperdrive", localConnectionString: "postgres://localhost/db", type: "hyperdrive" },
     { queue: "jobs", queue_name: "jobs", type: "queue" },

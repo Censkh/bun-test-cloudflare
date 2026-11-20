@@ -17,6 +17,7 @@ const getInlineConfig = (input: WorkerInput) => {
 
 const SHARED_SLOT_BINDINGS = new Set([
   "analytics_engine",
+  "assets",
   "browser",
   "hyperdrive",
   "images",
@@ -52,8 +53,8 @@ export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: 
   }
   if (binding.type === "ratelimit") return typeof binding.namespace_id === "string";
   // Shared by every slot, as they are by every generation: Hyperdrive reaches an outside database,
-  // Browser Rendering a local browser whose sessions each reset closes, and sent email and Analytics
-  // Engine writes keep no state a Worker can read back.
+  // Browser Rendering a local browser whose sessions each reset closes, sent email and Analytics
+  // Engine writes keep no state a Worker can read back, and static assets are only read.
   return SHARED_SLOT_BINDINGS.has(binding.type);
 };
 
