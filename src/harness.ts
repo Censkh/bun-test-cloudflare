@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import type { TestHarness, TestHarnessOptions, WorkerHandle } from "wrangler";
 import { unstable_readConfig } from "wrangler";
 import { copyAdditionalModules, getAdditionalModuleSourceRoots } from "./AdditionalModules";
+import { canUseFencedWorkerSlots, createFencedWorkerSlots } from "./FencedWorkerSlots";
 import {
   type CloudflareHarnessRunContext,
   getCloudflareHarnessRunContext,
@@ -813,8 +814,12 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
           return workerPlans.map((worker, index) => prepareWorkerInput(worker, buildResults[index]!));
         })();
   logTiming("worker builds", buildStartedAt);
+  const supportsFencedWorkerSlots =
+    configuredIsolatedWorkerSlots === 1 ? false : canUseFencedWorkerSlots(preparedWorkers);
   const supportsIsolatedWorkerSlots =
-    configuredIsolatedWorkerSlots === 1 ? false : canUseIsolatedWorkerSlots(preparedWorkers);
+    configuredIsolatedWorkerSlots === 1
+      ? false
+      : supportsFencedWorkerSlots || canUseIsolatedWorkerSlots(preparedWorkers);
   const isolatedWorkerSlots =
     configuredIsolatedWorkerSlots ?? (supportsIsolatedWorkerSlots ? DEFAULT_ISOLATED_WORKER_SLOTS : 1);
 
@@ -822,18 +827,25 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     throw new TypeError("isolatedWorkerSlots does not support one or more configured Worker bindings");
   }
 
+  const fencedSlots =
+    isolatedWorkerSlots > 1 && supportsFencedWorkerSlots
+      ? createFencedWorkerSlots(preparedWorkers, isolatedWorkerSlots)
+      : undefined;
   const workerSlots =
-    isolatedWorkerSlots > 1 ? createIsolatedWorkerSlots(preparedWorkers, isolatedWorkerSlots) : undefined;
+    isolatedWorkerSlots > 1 && !fencedSlots
+      ? createIsolatedWorkerSlots(preparedWorkers, isolatedWorkerSlots)
+      : undefined;
 
   const testHarnessOptions = {
     ...serverConfig,
-    workers: workerSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
+    workers: fencedSlots?.inputs ?? workerSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
   };
   const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
       cacheBridgeSecret: workerSlots?.secret,
       events,
+      fencedSlots,
       hasBrowserRendering,
       preparedWorkers,
       testHarnessOptions,

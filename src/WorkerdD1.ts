@@ -60,3 +60,28 @@ export function executeRunD1Operation(database: RunD1Binding, operation: RunD1Op
       return statement.all();
   }
 }
+
+const quoteSqliteIdentifier = (name: string) => `"${name.replaceAll('"', '""')}"`;
+
+/** Drops all user tables, views, and triggers from a D1 database between fenced runs. */
+export async function clearD1Database(database: RunD1Binding): Promise<void> {
+  const { results } = await database
+    .prepare(
+      "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND type IN ('trigger', 'view', 'table')",
+    )
+    .all<{ type: string; name: string }>();
+  if (results.length === 0) return;
+
+  const triggers = results.filter((row) => row.type === "trigger");
+  const views = results.filter((row) => row.type === "view");
+  const tables = results.filter((row) => row.type === "table");
+
+  const statements = [
+    database.prepare("PRAGMA foreign_keys = OFF"),
+    ...triggers.map((row) => database.prepare(`DROP TRIGGER IF EXISTS ${quoteSqliteIdentifier(row.name)}`)),
+    ...views.map((row) => database.prepare(`DROP VIEW IF EXISTS ${quoteSqliteIdentifier(row.name)}`)),
+    ...tables.map((row) => database.prepare(`DROP TABLE IF EXISTS ${quoteSqliteIdentifier(row.name)}`)),
+    database.prepare("PRAGMA foreign_keys = ON"),
+  ];
+  await database.batch(statements);
+}

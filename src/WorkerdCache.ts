@@ -27,6 +27,7 @@ export async function executeRunCacheOperation(
   storage: Pick<RunCacheStorage, "open">,
   runId: string,
   { cacheName, ...operation }: RunCacheOperation,
+  onPut?: (cacheName: string | undefined, url: string) => void,
 ) {
   // A named cache preserves the original URL, method and headers while isolating the keys.
   const cache = await storage.open(JSON.stringify([runId, cacheName]));
@@ -36,7 +37,37 @@ export async function executeRunCacheOperation(
       return cache.delete(request, operation.options);
     case "match":
       return cache.match(request, operation.options);
-    case "put":
-      return cache.put(request, operation.response);
+    case "put": {
+      let response = operation.response;
+      if (response.body !== null) {
+        const bytes = await response.arrayBuffer();
+        const headers = new Headers(response.headers);
+        if (!headers.has("content-length")) {
+          headers.set("content-length", String(bytes.byteLength));
+        }
+        response = new Response(bytes, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      }
+      await cache.put(request, response);
+      onPut?.(cacheName, request.url);
+      return;
+    }
   }
+}
+
+/** Reclaims cached entries written during a retired run. */
+export async function clearRunCaches(
+  storage: Pick<RunCacheStorage, "open">,
+  runId: string,
+  entries: Map<string | undefined, Set<string>>,
+): Promise<void> {
+  for (const [cacheName, urls] of entries) {
+    if (urls.size === 0) continue;
+    const cache = await storage.open(JSON.stringify([runId, cacheName]));
+    await Promise.all(Array.from(urls, (url) => cache.delete(url, { ignoreMethod: true })));
+  }
+  entries.clear();
 }

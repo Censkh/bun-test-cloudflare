@@ -48,13 +48,14 @@ test("reuses two binding slots with fresh modules and rejects retired background
     expect((await request("work/a/old")).status).toBe(410);
 
     const sources = ["alarm", "queue", "waitUntil"];
+    const rejectedSources = [...sources, "childWaitUntil"];
     const rows = () => DB.prepare("SELECT * FROM effects ORDER BY slot, source").all();
-    const outcomes = () => Promise.all(sources.map((source) => OBSERVED.get(`old/${source}`)));
+    const outcomes = () => Promise.all(rejectedSources.map((source) => OBSERVED.get(`old/${source}`)));
     for (let attempt = 0; attempt < 100; attempt++) {
       if ((await outcomes()).every((outcome) => outcome === "rejected") && (await rows()).results.length === 6) break;
       await Bun.sleep(50);
     }
-    expect(await outcomes()).toEqual(sources.map(() => "rejected"));
+    expect(await outcomes()).toEqual(rejectedSources.map(() => "rejected"));
     expect((await rows()).results).toEqual([
       ...sources.map((source) => ({ slot: "a", run: "next", source })),
       ...sources.map((source) => ({ slot: "b", run: "other-slot", source })),
@@ -106,6 +107,10 @@ test("fenced R2 preserves bytes, range requests, preconditions, listings and met
       preconditionHasBody: false,
       listed: ["folder/asset"],
       deleted: null,
+      streamedBytes: [7, 8, 9],
+      multiSize: 3,
+      multiCustom: { mode: "multipart" },
+      multiBytes: [1, 2, 3],
     });
     expect(await proxied.json()).toEqual(expected);
   });

@@ -24,7 +24,7 @@ describe("prewarmed harness storage reset", () => {
       result.expectStatusCode(0);
       expect(output).not.toContain("discarded prewarmed server during reset");
       expect(output).toContain("reset:slot");
-      expect(output).toContain("reset:generation");
+      expect(output).not.toContain("reset:generation");
     },
     75_000,
   );

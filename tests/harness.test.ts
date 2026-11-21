@@ -119,6 +119,9 @@ const createFakeServer = (): FakeServer => ({
   getWorker(name?: string) {
     this.getWorkerCalls.push(String(name));
     const worker: Partial<FakeWorker> = { name };
+    Object.defineProperty(worker, "fetch", {
+      value: async () => new Response(null, { status: 204 }),
+    });
     Object.defineProperty(worker, "getEnv", {
       value: async () => {
         if (this.getEnvError) {

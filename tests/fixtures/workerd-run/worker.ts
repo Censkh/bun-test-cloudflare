@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import {
   createRunCacheStorage,
   createRunD1Binding,
@@ -37,6 +37,12 @@ type Env = {
 };
 
 export { RunBindingCapability };
+
+export class Observer extends WorkerEntrypoint<Env> {
+  record(key: string, value: string) {
+    return this.env.OBSERVED.put(key, value);
+  }
+}
 
 export class Slot extends RunBindingProxy<Env> {
   protected async resetBindings() {
@@ -120,7 +126,22 @@ export default {
     if (delay !== null) {
       await env.BINDINGS.invoke("queue", delay ? 2 : 0);
       await env.BINDINGS.invoke("alarm", delay ? 1800 : 0);
-      if (!delay) ctx.waitUntil(env.BINDINGS.invoke("effect", "waitUntil"));
+      if (delay) {
+        ctx.waitUntil(
+          (async () => {
+            await scheduler.wait(500);
+            try {
+              await env.BINDINGS.invoke("effect", "childWaitUntil");
+            } catch (error) {
+              if (error instanceof Error && error.message.includes(${JSON.stringify(runEnded)})) {
+                await env.OBSERVER.record("old/childWaitUntil", "rejected");
+              }
+            }
+          })(),
+        );
+      } else {
+        ctx.waitUntil(env.BINDINGS.invoke("effect", "waitUntil"));
+      }
     }
     return Response.json(++requests);
   },
@@ -165,6 +186,18 @@ async function exerciseR2(bucket: RunR2Binding) {
   const denied = (await bucket.get("folder/asset", { onlyIf: new Headers({ "if-match": '"different"' }) }))!;
   const listed = await bucket.list({ prefix: "folder/" });
   await bucket.delete("folder/asset");
+  const fixed = new FixedLengthStream(3);
+  const writer = fixed.writable.getWriter();
+  void writer.write(Uint8Array.of(7, 8, 9)).then(() => writer.close());
+  await bucket.put("folder/streamed", fixed.readable);
+  const streamedBytes = [...new Uint8Array(await (await bucket.get("folder/streamed"))!.arrayBuffer())];
+  await bucket.delete("folder/streamed");
+  const upload = await bucket.createMultipartUpload("folder/multi", { customMetadata: { mode: "multipart" } });
+  const part1 = await upload.uploadPart(1, Uint8Array.of(1, 2, 3));
+  const resumed = bucket.resumeMultipartUpload("folder/multi", upload.uploadId);
+  const completed = await resumed.complete([part1]);
+  const multiBytes = [...new Uint8Array(await (await bucket.get("folder/multi"))!.arrayBuffer())];
+  await bucket.delete("folder/multi");
   return {
     size: head.size,
     etag: head.httpEtag,
@@ -177,6 +210,10 @@ async function exerciseR2(bucket: RunR2Binding) {
     preconditionHasBody: "body" in denied,
     listed: listed.objects.map(({ key }) => key),
     deleted: await bucket.head("folder/asset"),
+    streamedBytes,
+    multiSize: completed.size,
+    multiCustom: completed.customMetadata,
+    multiBytes,
   };
 }
 
@@ -248,6 +285,7 @@ export default {
       globalOutbound: null,
       env: {
         BINDINGS: capability,
+        OBSERVER: ctx.exports.Observer({ props: {} }),
       },
     }))
       .getEntrypoint()

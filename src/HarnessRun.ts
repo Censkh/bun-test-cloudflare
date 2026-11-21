@@ -6,6 +6,13 @@ import path from "node:path";
 import type { TestHarness, TestHarnessOptions } from "wrangler";
 import { createTestHarness } from "wrangler";
 import { createWorkerCacheStorage, getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
+import {
+  activateFencedSlot,
+  createFencedBunCacheStorage,
+  createFencedWorkerHandle,
+  retireFencedSlot,
+} from "./FencedEnvBridge";
+import type { FencedWorkerSlots } from "./FencedWorkerSlots";
 import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
 import { getObservedBrowserRenderingLaunchCount } from "./patches/BrowserRenderingPatch";
@@ -44,6 +51,7 @@ export type CloudflareHarnessRunContext<TWorkers extends Record<string, Cloudfla
 type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
   cacheBridgeSecret?: string;
   events: CloudflareHarnessConfig<TWorkers>["events"];
+  fencedSlots?: FencedWorkerSlots;
   hasBrowserRendering: boolean;
   preparedWorkers: PreparedWorkerInput[];
   testHarnessOptions: Omit<TestHarnessOptions, "workers"> & { workers: WorkerInput[] };
@@ -216,6 +224,8 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   readonly #storageRoot = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-"));
   #activeWorkerSlot = 0;
   #fence = new RunFence();
+  #fencedRunCounter = 0;
+  #fencedRunId = "";
   #cacheStorage: CacheStorage | undefined;
   #closed = false;
   #startPromise: Promise<void> | undefined;
@@ -242,6 +252,21 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
         ),
       );
       logTiming(`${this.#timingLabel} start:listen`, listenStartedAt);
+
+      if (this.options.fencedSlots) {
+        const activateStartedAt = performance.now();
+        this.#fencedRunId = `run-${++this.#fencedRunCounter}`;
+        const supervisor = this.#server.getWorker(this.options.fencedSlots.slotSupervisorNames[this.#activeWorkerSlot]);
+        await this.#untilRuntimeCrash(
+          activateFencedSlot(
+            supervisor,
+            this.options.fencedSlots.secret,
+            this.#fencedRunId,
+            this.#readLiveWorkerVars(),
+          ),
+        );
+        logTiming(`${this.#timingLabel} start:activate`, activateStartedAt);
+      }
 
       this.#context = this.#createContext();
       const cachesStartedAt = performance.now();
@@ -305,6 +330,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   }
 
   canRotateWorkerSlotForReuse() {
+    if (this.options.fencedSlots) return true;
     return this.#activeWorkerSlot + 1 < (this.options.workerSlotNames?.[0]?.length ?? 1);
   }
 
@@ -315,6 +341,28 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
 
     await this.#untilRuntimeCrash(this.#fence.retire());
+    if (this.options.fencedSlots) {
+      const slotStartedAt = performance.now();
+      const { secret, slotSupervisorNames } = this.options.fencedSlots;
+      const previousSupervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
+      await this.#untilRuntimeCrash(retireFencedSlot(previousSupervisor, secret));
+      await this.#untilRuntimeCrash(this.#settleBackgroundWork());
+      this.#logStream.flush();
+      this.#activeWorkerSlot = (this.#activeWorkerSlot + 1) % slotSupervisorNames.length;
+      this.#fencedRunId = `run-${++this.#fencedRunCounter}`;
+      const nextSupervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
+      await this.#untilRuntimeCrash(
+        activateFencedSlot(nextSupervisor, secret, this.#fencedRunId, this.#readLiveWorkerVars()),
+      );
+      this.#fence = new RunFence();
+      this.#context = this.#createContext();
+      this.#cacheStorage = await this.#getCacheStorage();
+      logTiming(`${this.#timingLabel} reset:slot`, slotStartedAt);
+      this.#server.clearLogs();
+      logTiming(`${this.#timingLabel} reset`, startedAt);
+      return;
+    }
+
     await this.#untilRuntimeCrash(this.#settleBackgroundWork());
     this.#logStream.flush();
     if (this.canRotateWorkerSlotForReuse()) {
@@ -461,7 +509,54 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     return runWithTestHarnessPersistencePath(persistencePath, callback);
   }
 
+  #readLiveWorkerVars(): Record<string, Record<string, unknown>> {
+    const result: Record<string, Record<string, unknown>> = {};
+    for (const [index, [, workerConfig]] of this.options.workerEntries.entries()) {
+      const name = this.options.fencedSlots?.workerSpecs[index]?.name;
+      if (!name) continue;
+      const configVars =
+        "config" in workerConfig &&
+        typeof workerConfig.config === "object" &&
+        workerConfig.config !== null &&
+        "vars" in workerConfig.config &&
+        workerConfig.config.vars
+          ? (workerConfig.config.vars as Record<string, unknown>)
+          : {};
+      const vars = "vars" in workerConfig && workerConfig.vars ? (workerConfig.vars as Record<string, unknown>) : {};
+      const secrets =
+        "secrets" in workerConfig && workerConfig.secrets ? (workerConfig.secrets as Record<string, unknown>) : {};
+      const merged = { ...configVars, ...vars, ...secrets };
+      if (Object.keys(merged).length > 0) {
+        result[name] = merged;
+      }
+    }
+    return result;
+  }
+
   #createContext(): CloudflareHarnessRunContext<TWorkers> {
+    if (this.options.fencedSlots) {
+      const { secret, slotSupervisorNames, workerSpecs } = this.options.fencedSlots;
+      const supervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
+      const liveVars = this.#readLiveWorkerVars();
+      const workers = Object.fromEntries(
+        this.options.workerEntries.map(([key], workerIndex) => {
+          const spec = workerSpecs[workerIndex]!;
+          return [
+            key,
+            createFencedWorkerHandle({
+              fence: this.#fence,
+              runId: this.#fencedRunId,
+              runtimeVars: liveVars[spec.name],
+              secret,
+              spec,
+              supervisor,
+            }),
+          ];
+        }),
+      ) as unknown as CloudflareWorkerMap<TWorkers>;
+      return { workers, server: this.#getExposedServer(workers) };
+    }
+
     const workers = Object.fromEntries(
       this.options.workerEntries.map(([key, worker], workerIndex) => {
         const workerName =
@@ -474,6 +569,11 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   }
 
   async #getCacheStorage() {
+    if (this.options.fencedSlots) {
+      const { secret, slotSupervisorNames } = this.options.fencedSlots;
+      const supervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
+      return createFencedBunCacheStorage(supervisor, secret, this.#fencedRunId, this.#fence);
+    }
     if (this.options.cacheBridgeSecret && this.#context) {
       const primaryWorker = Object.values(this.#context.workers)[0];
       if (primaryWorker) {
@@ -487,6 +587,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     const fence = this.#fence;
     const slot = this.#activeWorkerSlot;
     const slotNames = this.options.workerSlotNames;
+    const fencedSlots = this.options.fencedSlots;
     const call = <T>(callback: () => T): T => {
       fence.assertActive();
       return callback();
@@ -494,7 +595,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     return {
       listen: () => fence.dispatch(() => this.#server.listen()),
       fetch: (input, init) => {
-        const primary = slotNames && Object.values(workers)[0];
+        const primary = (slotNames || fencedSlots) && Object.values(workers)[0];
         if (primary) return primary.fetch(input, init);
         return fence.dispatch(() => this.#server.fetch(input, init));
       },
@@ -502,6 +603,10 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
         const index = this.options.workerEntries.findIndex(
           ([key, worker]) => name === undefined || name === (worker.name ?? String(key)),
         );
+        if (fencedSlots && index >= 0) {
+          const [key] = this.options.workerEntries[index]!;
+          return workers[key] as any;
+        }
         return fence.worker(this.#server.getWorker(slotNames?.[index]?.[slot] ?? name));
       },
       getLogs: () => call(() => this.#server.getLogs()),
@@ -518,6 +623,32 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       return;
     }
     if (getObservedBrowserRenderingLaunchCount() === this.#initialBrowserRenderingLaunchCount) {
+      return;
+    }
+
+    if (this.options.fencedSlots) {
+      const supervisor = this.#server.getWorker(this.options.fencedSlots.slotSupervisorNames[this.#activeWorkerSlot]);
+      try {
+        const env = (await supervisor.getEnv()) as Record<string, unknown>;
+        const binding = env.SHARED_BROWSER as Fetcher | undefined;
+        if (!binding || typeof binding.fetch !== "function") return;
+        const sessions = await getBrowserRenderingSessions(binding);
+        if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP && sessions.length > 0) {
+          console.error(
+            `[bun-test-cloudflare] closing ${sessions.length} Browser Rendering session(s) for fenced slot`,
+          );
+        }
+        await Promise.all(
+          sessions.map(async (session) => {
+            if (typeof session.sessionId === "string") {
+              await closeBrowserRenderingSession(binding, session.sessionId);
+            }
+          }),
+        );
+      } catch (error) {
+        console.error("[bun-test-cloudflare] Failed closing active Browser Rendering sessions:");
+        console.error(error);
+      }
       return;
     }
 

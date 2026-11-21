@@ -1,14 +1,60 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
-export { createRunCacheStorage, executeRunCacheOperation, type RunCacheOperation } from "./WorkerdCache";
-export { createRunD1Binding, executeRunD1Operation, type RunD1Binding, type RunD1Operation } from "./WorkerdD1";
-export { createRunR2Binding, executeRunR2Operation, type RunR2Binding, type RunR2Operation } from "./WorkerdR2";
+export {
+  clearRunCaches,
+  createRunCacheStorage,
+  executeRunCacheOperation,
+  type RunCacheOperation,
+} from "./WorkerdCache";
+export { decodeBridgeValue, encodeBridgeValue } from "./WorkerdCodec";
+export {
+  clearD1Database,
+  createRunD1Binding,
+  executeRunD1Operation,
+  type RunD1Binding,
+  type RunD1Operation,
+} from "./WorkerdD1";
+export {
+  clearRunDurableObjects,
+  createRunDurableObjectNamespace,
+  encodeScopedObjectName,
+  executeRunDurableObjectOperation,
+  parseRunObjectIdentity,
+  type RunDurableObjectOperation,
+  type RunDurableObjectTarget,
+  runObjectName,
+} from "./WorkerdDurableObject";
+export { clearKVNamespace, createRunKVBinding, executeRunKVOperation, type RunKVOperation } from "./WorkerdKV";
+export {
+  createRunQueueBinding,
+  executeRunQueueOperation,
+  type RunQueueBody,
+  type RunQueueOperation,
+  runQueueMessage,
+} from "./WorkerdQueue";
+
+import type { RunQueueBody } from "./WorkerdQueue";
+
+export {
+  clearR2Bucket,
+  createRunR2Binding,
+  type EncodedR2Object,
+  executeRunR2Operation,
+  type RunR2Binding,
+  type RunR2Operation,
+} from "./WorkerdR2";
+export {
+  createRunRateLimitBinding,
+  executeRunRateLimitOperation,
+  type RunRateLimitOperation,
+} from "./WorkerdRateLimit";
 
 export type RunOperation = { name: string; args: unknown[] };
 export const runEnded = "BUN_TEST_CLOUDFLARE_RUN_ENDED";
 
 export abstract class RunBindingProxy<Env> extends DurableObject<Env> {
   #active: string | undefined;
+  #lastActive: string | undefined;
   #rotation = Promise.resolve();
   readonly #pending = new Set<Promise<unknown>>();
 
@@ -16,20 +62,36 @@ export abstract class RunBindingProxy<Env> extends DurableObject<Env> {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
       this.#active = await ctx.storage.get<string>("active");
+      this.#lastActive = this.#active;
     });
   }
 
   /** Run IDs must never be reused. A failed reset leaves admission closed. */
   activate(runId: string): Promise<void> {
     const rotate = async () => {
+      const retiredRunId = this.#lastActive;
       this.#active = undefined;
       await this.ctx.storage.delete("active");
       await Promise.allSettled(this.#pending);
-      await this.resetBindings();
+      await this.resetBindings(retiredRunId);
+      this.#lastActive = undefined;
       await this.ctx.storage.put("active", runId);
       this.#active = runId;
+      this.#lastActive = runId;
     };
     const next = this.#rotation.then(rotate);
+    this.#rotation = next.catch(() => {});
+    return next;
+  }
+
+  /** Closes admission for the active run and drains in-flight binding operations. */
+  retire(): Promise<void> {
+    const close = async () => {
+      this.#active = undefined;
+      await this.ctx.storage.delete("active");
+      await Promise.allSettled(this.#pending);
+    };
+    const next = this.#rotation.then(close);
     this.#rotation = next.catch(() => {});
     return next;
   }
@@ -52,7 +114,7 @@ export abstract class RunBindingProxy<Env> extends DurableObject<Env> {
   // Adapters must finish or await every side effect before resolving and never expose raw mutable
   // bindings. Dynamic Workers receive only the capability below.
   protected abstract perform(operation: RunOperation, runId: string): Promise<unknown>;
-  protected abstract resetBindings(): Promise<void>;
+  protected abstract resetBindings(retiredRunId?: string): Promise<void>;
 }
 
 type RunCapabilityProps = { runId: string; proxy: DurableObjectStub<RunBindingProxy<unknown>> };
@@ -71,11 +133,6 @@ export const loadRunWorker = (
   workerName: string,
   code: () => WorkerLoaderWorkerCode | Promise<WorkerLoaderWorkerCode>,
 ) => loader.get(JSON.stringify([runId, workerName]), code);
-
-export type RunQueueBody<Body> = { runId: string; body: Body };
-
-/** An envelope uses native V8 serialization so the payload can contain bytes and other RPC values. */
-export const runQueueMessage = <Body>(runId: string, body: Body): RunQueueBody<Body> => ({ runId, body });
 
 /** Drop retired messages individually, even when the broker delivers mixed generations. */
 export const dispatchRunQueue = async <Body>(
@@ -113,8 +170,6 @@ export const dispatchRunQueue = async <Body>(
     else scopedBatch.ackAll();
   }
 };
-
-export const runObjectName = (runId: string, name: string) => JSON.stringify([runId, name]);
 
 const alarmRunKey = "__bun_test_cloudflare_alarm_run";
 
