@@ -10,6 +10,7 @@ import { drainHarnessRun } from "./HarnessRunTeardown";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
 import { getObservedBrowserRenderingLaunchCount } from "./patches/BrowserRenderingPatch";
 import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
+import { RunFence } from "./RunFence";
 import {
   createRuntimeCrashMonitor,
   runWithWorkerdProcessOwner,
@@ -209,43 +210,23 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   readonly #capturedDevEnvs: CapturedDevEnv[] = [];
   readonly #initialBrowserRenderingLaunchCount = getObservedBrowserRenderingLaunchCount();
   readonly #platformProxyDispatches = createAsyncOperationTracker();
-  readonly #exposedServer: TestHarness;
   readonly #server: TestHarness;
   readonly #logStream: ReturnType<typeof streamServerLogs>;
   readonly #runtime = createRuntimeCrashMonitor();
   readonly #storageRoot = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-"));
   #activeWorkerSlot = 0;
+  #fence = new RunFence();
   #cacheStorage: CacheStorage | undefined;
   #closed = false;
   #startPromise: Promise<void> | undefined;
   #storageGeneration = 0;
-  #workers: CloudflareWorkerMap<TWorkers> | undefined;
+  #context: CloudflareHarnessRunContext<TWorkers> | undefined;
 
   readonly #timingLabel: string;
 
   constructor(private readonly options: HarnessRunOptions<TWorkers>) {
     this.#timingLabel = options.preparedWorkers.map((worker) => worker.name).join(",");
     this.#server = createTestHarness(options.testHarnessOptions);
-    this.#exposedServer = options.workerSlotNames
-      ? new Proxy(this.#server, {
-          get: (server, property) => {
-            if (property === "fetch") {
-              return (input: RequestInfo | URL, init?: RequestInit) => {
-                const primaryWorker = this.#workers && Object.values(this.#workers)[0];
-                if (!primaryWorker) {
-                  throw new Error("Cloudflare harness run failed to start");
-                }
-                return primaryWorker.fetch(input, init);
-              };
-            }
-            if (property === "getWorker") {
-              return (workerName?: string) => this.#getExposedWorker(workerName);
-            }
-            const value = server[property as keyof TestHarness];
-            return typeof value === "function" ? value.bind(server) : value;
-          },
-        })
-      : this.#server;
     this.#logStream = streamServerLogs(this.#server);
   }
 
@@ -262,7 +243,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       );
       logTiming(`${this.#timingLabel} start:listen`, listenStartedAt);
 
-      this.#workers = this.#getWorkers();
+      this.#context = this.#createContext();
       const cachesStartedAt = performance.now();
       this.#cacheStorage = await this.#getCacheStorage();
       logTiming(`${this.#timingLabel} start:caches`, cachesStartedAt);
@@ -284,14 +265,15 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     try {
       return await platformProxyDispatchContext.run(this.#platformProxyDispatches, async () => {
         await this.#untilRuntimeCrash(this.start());
-        const workers = this.#workers;
-        if (!workers) {
+        const context = this.#context;
+        if (!context) {
           throw new Error("Cloudflare harness run failed to start");
         }
+        const { server, workers } = context;
         const runCallback = () =>
-          harnessRunContext.run({ server: this.#exposedServer, workers }, async () => {
-            await this.options.events?.beforeRun?.(workers, this.#exposedServer);
-            return callback(workers, this.#exposedServer);
+          harnessRunContext.run(context, async () => {
+            await this.options.events?.beforeRun?.(workers, server);
+            return callback(workers, server);
           });
 
         const callbackStartedAt = performance.now();
@@ -314,11 +296,11 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   async assertUsable() {
     const startedAt = performance.now();
     await this.#untilRuntimeCrash(this.start());
-    if (!this.#workers) {
+    if (!this.#context) {
       throw new Error("Cloudflare harness run failed to start");
     }
 
-    await this.#untilRuntimeCrash(Promise.all(Object.values(this.#workers).map((worker) => worker.getEnv())));
+    await this.#untilRuntimeCrash(Promise.all(Object.values(this.#context.workers).map((worker) => worker.getEnv())));
     logTiming(`${this.#timingLabel} assert-usable`, startedAt);
   }
 
@@ -332,12 +314,14 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       throw new Error("Cloudflare harness run is closed");
     }
 
+    await this.#untilRuntimeCrash(this.#fence.retire());
     await this.#untilRuntimeCrash(this.#settleBackgroundWork());
     this.#logStream.flush();
     if (this.canRotateWorkerSlotForReuse()) {
       const slotStartedAt = performance.now();
       this.#activeWorkerSlot += 1;
-      this.#workers = this.#getWorkers();
+      this.#fence = new RunFence();
+      this.#context = this.#createContext();
       this.#cacheStorage = await this.#getCacheStorage();
       logTiming(`${this.#timingLabel} reset:slot`, slotStartedAt);
     } else {
@@ -389,6 +373,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     if (this.#closed) return;
     const startedAt = performance.now();
     this.#closed = true;
+    const pendingDispatches = this.#fence.retire();
     if (process.env.BUN_TEST_CLOUDFLARE_DEBUG_CLEANUP) {
       console.error("[bun-test-cloudflare] draining runtime messages");
     }
@@ -411,7 +396,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       );
     };
     if (!this.#runtime.crash) {
-      await this.#untilRuntimeCrash(drain()).catch((error) => {
+      await this.#untilRuntimeCrash(pendingDispatches.then(drain)).catch((error) => {
         if (error !== this.#runtime.crash) throw error;
       });
     }
@@ -465,7 +450,8 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       logTiming(`${this.#timingLabel} reset:generation`, generationStartedAt);
     }
 
-    this.#workers = this.#getWorkers();
+    this.#fence = new RunFence();
+    this.#context = this.#createContext();
     this.#cacheStorage = await this.#getCacheStorage();
   }
 
@@ -475,20 +461,21 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     return runWithTestHarnessPersistencePath(persistencePath, callback);
   }
 
-  #getWorkers() {
-    return Object.fromEntries(
+  #createContext(): CloudflareHarnessRunContext<TWorkers> {
+    const workers = Object.fromEntries(
       this.options.workerEntries.map(([key, worker], workerIndex) => {
         const workerName =
           this.options.workerSlotNames?.[workerIndex]?.[this.#activeWorkerSlot] ?? worker.name ?? String(key);
-        const handle = this.#server.getWorker(workerName);
+        const handle = this.#fence.worker(this.#server.getWorker(workerName));
         return [key, handle];
       }),
     ) as unknown as CloudflareWorkerMap<TWorkers>;
+    return { workers, server: this.#getExposedServer(workers) };
   }
 
   async #getCacheStorage() {
-    if (this.options.cacheBridgeSecret && this.#workers) {
-      const primaryWorker = Object.values(this.#workers)[0];
+    if (this.options.cacheBridgeSecret && this.#context) {
+      const primaryWorker = Object.values(this.#context.workers)[0];
       if (primaryWorker) {
         return createWorkerCacheStorage(primaryWorker, this.options.cacheBridgeSecret);
       }
@@ -496,44 +483,53 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     return getCapturedRuntimeCaches(this.#capturedDevEnvs);
   }
 
-  #getExposedWorker(workerName?: string) {
-    const workerIndex = this.options.workerEntries.findIndex(
-      ([key, worker]) => workerName === undefined || workerName === (worker.name ?? String(key)),
-    );
-    if (workerIndex === -1) {
-      return this.#server.getWorker(workerName);
-    }
-    const activeWorkerName = this.options.workerSlotNames?.[workerIndex]?.[this.#activeWorkerSlot];
-    return this.#server.getWorker(activeWorkerName);
+  #getExposedServer(workers: CloudflareWorkerMap<TWorkers>): TestHarness {
+    const fence = this.#fence;
+    const slot = this.#activeWorkerSlot;
+    const slotNames = this.options.workerSlotNames;
+    const call = <T>(callback: () => T): T => {
+      fence.assertActive();
+      return callback();
+    };
+    return {
+      listen: () => fence.dispatch(() => this.#server.listen()),
+      fetch: (input, init) => {
+        const primary = slotNames && Object.values(workers)[0];
+        if (primary) return primary.fetch(input, init);
+        return fence.dispatch(() => this.#server.fetch(input, init));
+      },
+      getWorker: (name) => {
+        const index = this.options.workerEntries.findIndex(
+          ([key, worker]) => name === undefined || name === (worker.name ?? String(key)),
+        );
+        return fence.worker(this.#server.getWorker(slotNames?.[index]?.[slot] ?? name));
+      },
+      getLogs: () => call(() => this.#server.getLogs()),
+      clearLogs: () => call(() => this.#server.clearLogs()),
+      debug: () => call(() => this.#server.debug()),
+      update: (options) => fence.dispatch(() => this.#server.update(options)),
+      reset: () => fence.dispatch(() => this.#server.reset()),
+      close: () => fence.dispatch(() => this.#server.close()),
+    };
   }
 
   async #closeActiveBrowserRenderingSessions() {
-    if (!this.options.hasBrowserRendering || !this.#workers) {
+    if (!this.options.hasBrowserRendering || !this.#context) {
       return;
     }
     if (getObservedBrowserRenderingLaunchCount() === this.#initialBrowserRenderingLaunchCount) {
       return;
     }
 
-    const workerEntriesByName = new Map(
-      this.options.workerEntries.map(([key, worker]) => [worker.name ?? String(key), key]),
-    );
-
-    for (const preparedWorker of this.options.preparedWorkers) {
+    for (const [index, preparedWorker] of this.options.preparedWorkers.entries()) {
       const browserBindingName = preparedWorker.browserBindingName;
       if (!browserBindingName) {
         continue;
       }
 
-      const workerKey = workerEntriesByName.get(preparedWorker.name);
-      if (!workerKey) {
-        continue;
-      }
-
-      const worker = this.#workers[workerKey];
-      if (!worker) {
-        continue;
-      }
+      const worker = this.#server.getWorker(
+        this.options.workerSlotNames?.[index]?.[this.#activeWorkerSlot] ?? preparedWorker.name,
+      );
 
       try {
         const env = (await worker.getEnv()) as Record<string, unknown>;

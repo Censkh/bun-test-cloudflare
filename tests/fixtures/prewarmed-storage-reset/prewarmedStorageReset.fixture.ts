@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { getCloudflareHarnessRunContext } from "bun-test-cloudflare";
 import { harness } from "./harness";
 
 const storageKey = "prewarmed-storage-reset";
@@ -44,4 +45,36 @@ test("reuses isolated Worker slots with clean globals, caches, D1, KV, and R2", 
   await expectCleanState();
   await harness.run(async () => {});
   await expectCleanState();
+});
+
+test("a finished run's dispatch handles cannot mutate the next run", async () => {
+  const resume = Promise.withResolvers<void>();
+  const finished = await harness.run(async (workers, server) => {
+    expect((await workers.WORKER.fetch("https://example.com/state")).ok).toBe(true);
+    const lateDispatch = resume.promise.then(() =>
+      getCloudflareHarnessRunContext().server.fetch("https://example.com/write-cache"),
+    );
+    return { worker: workers.WORKER, server, lateDispatch };
+  });
+
+  await harness.run(async (_workers, server) => {
+    await expect(finished.worker.fetch("https://example.com/write-cache")).rejects.toHaveProperty(
+      "name",
+      "CloudflareHarnessRunEnded",
+    );
+    await expect(finished.server.fetch("https://example.com/write-cache")).rejects.toHaveProperty(
+      "name",
+      "CloudflareHarnessRunEnded",
+    );
+    await expect(finished.server.getWorker().fetch("https://example.com/write-cache")).rejects.toHaveProperty(
+      "name",
+      "CloudflareHarnessRunEnded",
+    );
+    resume.resolve();
+    await expect(finished.lateDispatch).rejects.toHaveProperty("name", "CloudflareHarnessRunEnded");
+    expect(await (await server.fetch("https://example.com/state")).json()).toEqual({
+      cached: null,
+      requestCount: 1,
+    });
+  });
 });

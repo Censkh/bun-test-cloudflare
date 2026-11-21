@@ -517,8 +517,8 @@ test("run starts the server, passes typed workers, and resets it before reuse", 
   });
 
   let server!: FakeServer;
-  const result = await harness.run((workers, currentServer) => {
-    server = currentServer as unknown as FakeServer;
+  const result = await harness.run((workers) => {
+    server = createdServers.at(-1)!;
     expect(workers.BACKEND as unknown).toEqual({ name: "backend-worker" });
     expect(workers.CMS as unknown).toEqual({ name: "cms-worker" });
     return "ok";
@@ -531,8 +531,8 @@ test("run starts the server, passes typed workers, and resets it before reuse", 
   expect(server.closeCalls).toBe(0);
 
   await harness.run(() => {});
-  await harness.run((_workers, currentServer) => {
-    expect(currentServer as unknown).toBe(server as unknown);
+  await harness.run(() => {
+    expect(createdServers.at(-1)).toBe(server);
   });
 
   expect(server.resetCalls).toBe(2);
@@ -610,12 +610,12 @@ test("parallel run calls use independent servers", async () => {
 
   let firstServer!: FakeServer;
   let secondServer!: FakeServer;
-  const firstRun = harness.run(async (_workers, server) => {
-    firstServer = server as unknown as FakeServer;
+  const firstRun = harness.run(async () => {
+    firstServer = createdServers[serversBefore]!;
     await Promise.resolve();
   });
-  const secondRun = harness.run(async (_workers, server) => {
-    secondServer = server as unknown as FakeServer;
+  const secondRun = harness.run(async () => {
+    secondServer = createdServers[serversBefore + 1]!;
     secondRunStarted();
     await secondRunReleasePromise;
   });
@@ -653,8 +653,8 @@ test("starts no server until the first run, then keeps the pool warm after a lea
   expect(createdServers.slice(serversBefore)).toHaveLength(0);
 
   let leasedServer!: FakeServer;
-  await harness.run((_workers, server) => {
-    leasedServer = server as unknown as FakeServer;
+  await harness.run(() => {
+    leasedServer = createdServers.at(-1)!;
     expect(createdServers.slice(serversBefore)).toHaveLength(WARM_WORKERD_POOL_SIZE);
     expect(createdServers.slice(serversBefore)).toContain(leasedServer);
   });
@@ -712,8 +712,8 @@ test("discards stale prewarmed servers before leasing them", async () => {
   initialWarmServers[0].getEnvError = new Error("poisoned warm server");
 
   let leasedServer!: FakeServer;
-  await harness.run((_workers, server) => {
-    leasedServer = server as unknown as FakeServer;
+  await harness.run(() => {
+    leasedServer = createdServers.at(-1)!;
   });
 
   expect(leasedServer).not.toBe(initialWarmServers[0]);
@@ -767,8 +767,8 @@ test("run tolerates uncloneable worker runtime logs", async () => {
   const dataCloneError = new DOMException("The object can not be cloned.", "DataCloneError");
   let server!: FakeServer;
   try {
-    await harness.run(async (_workers, currentServer) => {
-      server = currentServer as unknown as FakeServer;
+    await harness.run(async () => {
+      server = createdServers.at(-1)!;
       server.getLogsError = dataCloneError;
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
@@ -794,8 +794,8 @@ test("run fails after cleanup when Worker waitUntil work rejects", async () => {
   let server!: FakeServer;
   try {
     await expect(
-      harness.run((_workers, currentServer) => {
-        server = currentServer as unknown as FakeServer;
+      harness.run(() => {
+        server = createdServers.at(-1)!;
         server.logs = [{ level: "error", message: "waitUntil - Promise failed with error: background task failed" }];
       }),
     ).rejects.toThrow(/Worker waitUntil promise rejection:[\s\S]*background task failed/);
@@ -814,26 +814,28 @@ test("a lease runs each callback on one server without resetting it, then resets
   });
 
   const lease = await harness.lease();
-  const leasedServers: FakeServer[] = [];
+  const leasedServers: unknown[] = [];
   for (let index = 0; index < 3; index += 1) {
     const result = await lease.run((workers, server) => {
-      leasedServers.push(server as unknown as FakeServer);
+      leasedServers.push(server);
       expect(getCloudflareHarnessRunContext().server).toBe(server);
       expect(workers.BACKEND as unknown).toEqual({ name: "backend-worker" });
       return index;
     });
     expect(result).toBe(index);
   }
-  const [server] = leasedServers;
-  expect(leasedServers).toEqual([server!, server!, server!]);
-  expect(server!.resetCalls).toBe(0);
+  expect(leasedServers[1]).toBe(leasedServers[0]);
+  expect(leasedServers[2]).toBe(leasedServers[0]);
+  const server = createdServers.at(-1)!;
+  expect(server.resetCalls).toBe(0);
 
   await lease.release();
   await harness.run((_workers, nextServer) => {
-    expect(nextServer as unknown).toBe(server as unknown);
+    expect(nextServer).not.toBe(leasedServers[0]);
+    expect(createdServers.at(-1)).toBe(server);
   });
-  expect(server!.resetCalls).toBe(1);
-  expect(server!.closeCalls).toBe(0);
+  expect(server.resetCalls).toBe(1);
+  expect(server.closeCalls).toBe(0);
 });
 
 test("lease runs wait for the run before them", async () => {
@@ -876,8 +878,8 @@ test("a waitUntil failure fails only the lease run that caused it", async () => 
   const lease = await harness.lease();
   try {
     await expect(
-      lease.run((_workers, server) => {
-        (server as unknown as FakeServer).logs = [
+      lease.run(() => {
+        createdServers.at(-1)!.logs = [
           { level: "error", message: "waitUntil - Promise failed with error: background task failed" },
         ];
       }),
@@ -922,8 +924,8 @@ test("run closes the server after callback failure", async () => {
   let server!: FakeServer;
   try {
     await expect(
-      harness.run((_workers, currentServer) => {
-        server = currentServer as unknown as FakeServer;
+      harness.run(() => {
+        server = createdServers.at(-1)!;
         server.logs = [{ level: "error", message: "worker failed" }];
         throw new Error("boom");
       }),
