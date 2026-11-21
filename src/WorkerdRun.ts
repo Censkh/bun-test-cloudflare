@@ -6,7 +6,6 @@ export {
   executeRunCacheOperation,
   type RunCacheOperation,
 } from "./WorkerdCache";
-export { decodeBridgeValue, encodeBridgeValue } from "./WorkerdCodec";
 export {
   clearD1Database,
   createRunD1Binding,
@@ -84,16 +83,28 @@ export abstract class RunBindingProxy<Env> extends DurableObject<Env> {
     return next;
   }
 
-  /** Closes admission for the active run and drains in-flight binding operations. */
+  /**
+   * Closes admission for the active run, drains in-flight binding operations, and resets storage
+   * in the background so the slot is already clean by the time the next rotation activates it.
+   */
   retire(): Promise<void> {
+    let retiredRunId: string | undefined;
     const close = async () => {
+      retiredRunId = this.#lastActive;
       this.#active = undefined;
       await this.ctx.storage.delete("active");
       await Promise.allSettled(this.#pending);
     };
-    const next = this.#rotation.then(close);
-    this.#rotation = next.catch(() => {});
-    return next;
+    const closed = this.#rotation.then(close);
+    const reset = closed.then(async () => {
+      if (retiredRunId !== undefined) {
+        await this.resetBindings(retiredRunId);
+        this.#lastActive = undefined;
+      }
+    });
+    this.#rotation = reset.catch(() => {});
+    this.ctx.waitUntil(this.#rotation);
+    return closed;
   }
 
   isActive(runId: string): boolean {

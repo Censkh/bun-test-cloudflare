@@ -1,14 +1,8 @@
 import type { WorkerHandle } from "wrangler";
 import type { RunFence } from "./RunFence";
-import type { RunCacheOperation } from "./WorkerdCache";
-import { createRunCacheStorage } from "./WorkerdCache";
-import { decodeBridgeValue, encodeBridgeValue } from "./WorkerdCodec";
-import { createRunD1Binding, type RunD1Operation } from "./WorkerdD1";
-import { createRunDurableObjectNamespace, type RunDurableObjectOperation } from "./WorkerdDurableObject";
-import { createRunKVBinding, type RunKVOperation } from "./WorkerdKV";
-import { createRunQueueBinding, type RunQueueOperation } from "./WorkerdQueue";
-import { createRunR2Binding, type RunR2Operation } from "./WorkerdR2";
-import { createRunRateLimitBinding, type RunRateLimitOperation } from "./WorkerdRateLimit";
+import { createRunCacheStorage, type RunCacheOperation } from "./WorkerdCache";
+import { encodeScopedObjectName } from "./WorkerdDurableObject";
+import { runQueueMessage } from "./WorkerdQueue";
 
 export const BTCF_SECRET_HEADER = "x-btcf-secret";
 export const BTCF_RUN_ID_HEADER = "x-btcf-run-id";
@@ -36,50 +30,197 @@ export type FencedWorkerSpec = {
   vars: Record<string, unknown>;
 };
 
-type BridgeErrorPayload = {
-  __btcf_error: {
-    message: string;
-    name?: string;
-  };
+const unwrappedProxies = new WeakMap<object, unknown>();
+
+const unwrapArg = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(unwrapArg);
+  if (value && typeof value === "object") {
+    const inner = unwrappedProxies.get(value);
+    if (inner !== undefined) return inner;
+  }
+  return value;
 };
-
-const isBridgeError = (value: unknown): value is BridgeErrorPayload =>
-  value !== null && typeof value === "object" && "__btcf_error" in value;
-
-const rethrowBridgeError = (payload: BridgeErrorPayload): never => {
-  const error = new Error(payload.__btcf_error.message);
-  if (payload.__btcf_error.name) error.name = payload.__btcf_error.name;
-  throw error;
-};
-
-type EncodedHttpBody = {
-  body?: string | ArrayBuffer | Uint8Array | null;
-  meta: unknown;
-};
-
-const toUint8Array = (value: ArrayBuffer | ArrayBufferView): Uint8Array =>
-  value instanceof ArrayBuffer
-    ? new Uint8Array(value)
-    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
 
 /**
- * Splits out Request / Response bodies from operations so binary payloads stream as the HTTP
- * body instead of being base64-encoded inside JSON headers.
+ * Wraps a Miniflare ProxyClient binding (D1, KV, R2, etc.) with RunFence so calls from a retired
+ * run are rejected and in-flight calls are drained before slot reset, while keeping Miniflare's
+ * native sync/async proxy behavior intact.
  */
-const encodeOperationForHttp = async (name: string, operation: unknown): Promise<EncodedHttpBody> => {
-  if (name === "cache") {
-    const op = operation as RunCacheOperation;
-    const serializedRequest = {
-      url: op.request.url,
-      method: op.request.method,
-      headers: [...op.request.headers],
+const fenceNativeBinding = <T extends object>(target: T, fence: RunFence): T => {
+  const proxy = new Proxy(target, {
+    get(obj, prop, receiver) {
+      if (prop === "then" || prop === "catch" || prop === "finally") return undefined;
+      fence.assertActive();
+      const value = Reflect.get(obj, prop, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        fence.assertActive();
+        const result = Reflect.apply(value, obj, args.map(unwrapArg));
+        if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+          return fence.dispatch(() => result);
+        }
+        if (result && typeof result === "object") {
+          return fenceNativeBinding(result, fence);
+        }
+        return result;
+      };
+    },
+  });
+  unwrappedProxies.set(proxy, target);
+  return proxy;
+};
+
+const fenceQueueBinding = (rawQueue: Queue, runId: string, fence: RunFence): Queue => ({
+  metrics: () => fence.dispatch(() => rawQueue.metrics()),
+  send: (body: unknown, options?: QueueSendOptions) =>
+    fence.dispatch(() =>
+      rawQueue.send(runQueueMessage(runId, body), {
+        ...options,
+        contentType: "v8",
+      }),
+    ),
+  sendBatch: (messages: Iterable<MessageSendRequest<unknown>>, options?: QueueSendBatchOptions) =>
+    fence.dispatch(() =>
+      rawQueue.sendBatch(
+        Array.from(messages, (message) => ({
+          ...message,
+          body: runQueueMessage(runId, message.body),
+          contentType: "v8",
+        })),
+        options,
+      ),
+    ),
+});
+
+const fenceRateLimitBinding = (rawLimiter: RateLimit, runId: string, fence: RunFence): RateLimit => ({
+  limit: (options: RateLimitOptions) => fence.dispatch(() => rawLimiter.limit({ key: `${runId}:${options.key}` })),
+});
+
+type SlotProxyStub = {
+  recordTouchedDo(bindingName: string, hex: string): Promise<void>;
+};
+
+const fenceDurableObjectBinding = (
+  rawNamespace: DurableObjectNamespace,
+  supBinding: string,
+  slotProxy: SlotProxyStub | undefined,
+  runId: string,
+  fence: RunFence,
+): DurableObjectNamespace => {
+  const recorded = new Set<string>();
+  const queues = new Map<string, Promise<unknown>>();
+  const originalNames = new WeakMap<object, string | undefined>();
+
+  const wrapId = (nativeId: DurableObjectId, originalName: string | undefined): DurableObjectId => {
+    originalNames.set(nativeId, originalName);
+    const wrapped = new Proxy(nativeId, {
+      get(obj, prop, receiver) {
+        if (prop === "name") return originalName;
+        const value = Reflect.get(obj, prop, receiver);
+        return typeof value === "function" ? value.bind(obj) : value;
+      },
+    });
+    unwrappedProxies.set(wrapped, nativeId);
+    return wrapped;
+  };
+
+  const ensureRecorded = (hex: string) => {
+    if (!slotProxy || recorded.has(hex)) return;
+    recorded.add(hex);
+    void slotProxy.recordTouchedDo(supBinding, hex).catch(() => {});
+  };
+
+  const createStub = (id: DurableObjectId): DurableObjectStub => {
+    fence.assertActive();
+    const nativeId = (unwrappedProxies.get(id) as DurableObjectId | undefined) ?? id;
+    const rawStub = rawNamespace.get(nativeId) as unknown as DurableObjectStub & {
+      __btcf_rpc(prop: string, args: unknown[]): Promise<unknown>;
     };
-    if (op.method === "put") {
-      const body = await op.response.arrayBuffer();
-      return {
-        meta: {
-          name,
-          op: {
+    const hex = nativeId.toString();
+    const name = originalNames.get(nativeId) ?? id.name;
+
+    const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
+      const prev = queues.get(hex) ?? Promise.resolve();
+      const next = prev
+        .catch(() => {})
+        .then(() =>
+          fence.dispatch(async () => {
+            ensureRecorded(hex);
+            return await task();
+          }),
+        );
+      queues.set(hex, next);
+      return next;
+    };
+
+    return new Proxy({} as DurableObjectStub, {
+      get(_unused, property) {
+        if (property === "id") return id;
+        if (property === "name") return name;
+        if (property === "then" || property === "catch" || property === "finally" || typeof property === "symbol") {
+          return undefined;
+        }
+        if (property === "fetch") {
+          return (input: RequestInfo | URL, init?: RequestInit) =>
+            fence.dispatch(() => {
+              ensureRecorded(hex);
+              return rawStub.fetch(input as any, init as any);
+            });
+        }
+        return (...args: unknown[]) => enqueue(() => rawStub.__btcf_rpc(String(property), args));
+      },
+    });
+  };
+
+  const namespace: DurableObjectNamespace = {
+    newUniqueId: () => {
+      fence.assertActive();
+      return wrapId(
+        rawNamespace.idFromName(encodeScopedObjectName(runId, { kind: "unique", token: crypto.randomUUID() })),
+        undefined,
+      );
+    },
+    idFromName: (name: string) => {
+      fence.assertActive();
+      return wrapId(rawNamespace.idFromName(encodeScopedObjectName(runId, { kind: "named", name })), name);
+    },
+    idFromString: (hex: string) => {
+      fence.assertActive();
+      return rawNamespace.idFromString(hex);
+    },
+    get: (id: DurableObjectId) => createStub(id),
+    getByName: (name: string) => {
+      fence.assertActive();
+      const id = wrapId(rawNamespace.idFromName(encodeScopedObjectName(runId, { kind: "named", name })), name);
+      return createStub(id);
+    },
+    jurisdiction: () => namespace,
+  } as unknown as DurableObjectNamespace;
+
+  return namespace;
+};
+
+export const createFencedBunCacheStorage = (
+  supervisor: WorkerHandle,
+  secret: string,
+  runId: string,
+  fence: RunFence,
+): CacheStorage => {
+  const invokeCache = (op: RunCacheOperation) =>
+    fence.dispatch(async () => {
+      const serializedRequest = {
+        url: op.request.url,
+        method: op.request.method,
+        headers: [...op.request.headers],
+      };
+      const headers: Record<string, string> = {
+        [BTCF_SECRET_HEADER]: secret,
+        [BTCF_RUN_ID_HEADER]: runId,
+      };
+      let body: ArrayBuffer | string;
+      if (op.method === "put") {
+        headers[BTCF_META_HEADER] = encodeURIComponent(
+          JSON.stringify({
             cacheName: op.cacheName,
             method: "put",
             request: serializedRequest,
@@ -88,199 +229,48 @@ const encodeOperationForHttp = async (name: string, operation: unknown): Promise
               statusText: op.response.statusText,
               headers: [...op.response.headers],
             },
-          },
-        },
-        body,
-      };
-    }
-    return {
-      meta: {
-        name,
-        op: {
+          }),
+        );
+        headers["content-type"] = "application/octet-stream";
+        body = await op.response.arrayBuffer();
+      } else {
+        headers["content-type"] = "application/json";
+        body = JSON.stringify({
           cacheName: op.cacheName,
           method: op.method,
           request: serializedRequest,
           options: op.options,
-        },
-      },
-    };
-  }
+        });
+      }
 
-  if (name.startsWith("r2:")) {
-    const op = operation as RunR2Operation;
-    if (op.method === "put") {
-      const value = op.value;
-      if (value !== null && typeof value === "object" && "response" in value) {
-        const body = await value.response.arrayBuffer();
-        return {
-          meta: { name, op: { method: "put", key: op.key, options: op.options, hasBody: true, size: value.size } },
-          body,
+      const response = await supervisor.fetch("https://bun-test-cloudflare.invalid/__btcf/cache", {
+        method: "POST",
+        headers,
+        body: body as any,
+      });
+      if (response.status === 204) return undefined;
+      const metaHeader = response.headers.get(BTCF_META_HEADER);
+      if (metaHeader !== null) {
+        const meta = JSON.parse(decodeURIComponent(metaHeader)) as {
+          headers: [string, string][];
+          status: number;
+          statusText: string;
         };
+        const rawBytes = await response.arrayBuffer();
+        const isNullBody = meta.status === 101 || meta.status === 204 || meta.status === 205 || meta.status === 304;
+        return new Response(isNullBody ? null : rawBytes, {
+          status: meta.status,
+          statusText: meta.statusText,
+          headers: new Headers(meta.headers),
+        });
       }
-      if (typeof value === "string") {
-        return {
-          meta: { name, op: { method: "put", key: op.key, options: op.options, hasBody: true, isString: true } },
-          body: value,
-        };
+      if (!response.ok) {
+        throw new Error(`Fenced cache bridge failed (${response.status}): ${await response.text()}`);
       }
-      if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-        return {
-          meta: { name, op: { method: "put", key: op.key, options: op.options, hasBody: true } },
-          body: toUint8Array(value),
-        };
-      }
-      return { meta: { name, op: { method: "put", key: op.key, options: op.options, hasBody: false } } };
-    }
-    if (op.method === "multipartUploadPart") {
-      const value = op.value;
-      let body: string | ArrayBuffer | Uint8Array;
-      if (value !== null && typeof value === "object" && "response" in value) {
-        body = await value.response.arrayBuffer();
-      } else if (typeof value === "string") {
-        body = value;
-      } else {
-        body = toUint8Array(value as ArrayBuffer | ArrayBufferView);
-      }
-      return {
-        meta: {
-          name,
-          op: { method: "multipartUploadPart", key: op.key, uploadId: op.uploadId, partNumber: op.partNumber },
-        },
-        body,
-      };
-    }
-  }
-
-  if (name.startsWith("kv:")) {
-    const op = operation as RunKVOperation;
-    if (op.method === "put") {
-      const value = op.value;
-      if (typeof value === "string") {
-        return {
-          meta: { name, op: { method: "put", key: op.key, options: op.options, valueKind: "string" } },
-          body: value,
-        };
-      }
-      if (value !== null && typeof value === "object" && "response" in value) {
-        return {
-          meta: { name, op: { method: "put", key: op.key, options: op.options, valueKind: "bytes" } },
-          body: await value.response.arrayBuffer(),
-        };
-      }
-      return {
-        meta: { name, op: { method: "put", key: op.key, options: op.options, valueKind: "bytes" } },
-        body: toUint8Array(value as ArrayBuffer | ArrayBufferView),
-      };
-    }
-  }
-
-  if (name.startsWith("do:")) {
-    const op = operation as RunDurableObjectOperation;
-    if (op.method === "fetch") {
-      const hasBody = op.request.body !== null;
-      const body = hasBody ? await op.request.arrayBuffer() : undefined;
-      return {
-        meta: {
-          name,
-          op: {
-            method: "fetch",
-            target: op.target,
-            request: {
-              url: op.request.url,
-              method: op.request.method,
-              headers: [...op.request.headers],
-            },
-          },
-        },
-        body,
-      };
-    }
-  }
-
-  return { meta: { name, op: encodeBridgeValue(operation) } };
-};
-
-const invokeSupervisorBridge = async (
-  supervisor: WorkerHandle,
-  secret: string,
-  runId: string,
-  fence: RunFence,
-  name: string,
-  operation: unknown,
-): Promise<unknown> =>
-  fence.dispatch(async () => {
-    const encoded = await encodeOperationForHttp(name, operation);
-    const headers: Record<string, string> = {
-      [BTCF_SECRET_HEADER]: secret,
-      [BTCF_RUN_ID_HEADER]: runId,
-    };
-    let body: string | ArrayBuffer | Uint8Array | null | undefined;
-    if (encoded.body !== undefined) {
-      headers[BTCF_META_HEADER] = encodeURIComponent(JSON.stringify(encoded.meta));
-      headers["content-type"] = "application/octet-stream";
-      body = encoded.body;
-    } else {
-      headers["content-type"] = "application/json";
-      body = JSON.stringify(encoded.meta);
-    }
-
-    const response = await supervisor.fetch("https://bun-test-cloudflare.invalid/__btcf/env", {
-      method: "POST",
-      headers,
-      body: body as any,
+      return response.json();
     });
 
-    const responseMetaHeader = response.headers.get(BTCF_META_HEADER);
-    if (responseMetaHeader !== null) {
-      const meta = decodeBridgeValue(JSON.parse(decodeURIComponent(responseMetaHeader))) as Record<string, unknown>;
-      if (isBridgeError(meta)) rethrowBridgeError(meta);
-      const rawBytes = await response.arrayBuffer();
-      if (meta.__btcf_kind === "r2-object") {
-        const obj = meta.object as Record<string, unknown>;
-        const respHeaders = new Headers((obj.headers as [string, string][]) ?? []);
-        return { ...obj, response: new Response(rawBytes, { headers: respHeaders }) };
-      }
-      if (meta.__btcf_kind === "response") {
-        const status = meta.status as number;
-        const statusText = (meta.statusText as string) ?? "";
-        const respHeaders = new Headers((meta.headers as [string, string][]) ?? []);
-        const isNullBodyStatus = status === 101 || status === 204 || status === 205 || status === 304;
-        return new Response(isNullBodyStatus ? null : rawBytes, { status, statusText, headers: respHeaders });
-      }
-      if (meta.__btcf_kind === "kv-stream") {
-        return { __btcf_stream: true, response: new Response(rawBytes) };
-      }
-      if (meta.__btcf_kind === "kv-stream-meta") {
-        return {
-          value: { __btcf_stream: true, response: new Response(rawBytes) },
-          metadata: meta.metadata,
-          cacheStatus: meta.cacheStatus,
-        };
-      }
-      return meta.value;
-    }
-
-    if (response.status === 204) return undefined;
-    const text = await response.text();
-    if (!text) return undefined;
-    const parsed = decodeBridgeValue(JSON.parse(text));
-    if (isBridgeError(parsed)) rethrowBridgeError(parsed);
-    if (!response.ok) {
-      throw new Error(`Fenced binding bridge failed (${response.status}): ${text}`);
-    }
-    return parsed;
-  });
-
-export const createFencedBunCacheStorage = (
-  supervisor: WorkerHandle,
-  secret: string,
-  runId: string,
-  fence: RunFence,
-): CacheStorage => {
-  const storage = createRunCacheStorage((operation) =>
-    invokeSupervisorBridge(supervisor, secret, runId, fence, "cache", operation),
-  );
-  return storage as unknown as CacheStorage;
+  return createRunCacheStorage(invokeCache) as unknown as CacheStorage;
 };
 
 export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options: {
@@ -312,72 +302,38 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
   let cachedEnvPromise: Promise<TEnv> | undefined;
 
   const buildEnv = async (): Promise<TEnv> => {
-    const needsNative = Object.values(spec.bindings).some((desc) => desc.kind === "native");
-    const supervisorNativeEnv = needsNative
-      ? ((await fence.dispatch(() => supervisor.getEnv())) as Record<string, unknown>)
-      : undefined;
+    const hasBindings = Object.keys(spec.bindings).length > 0;
+    const rawEnv = hasBindings ? ((await fence.dispatch(() => supervisor.getEnv())) as Record<string, any>) : {};
+    const slotProxy = rawEnv.SLOT_PROXY?.getByName?.("slot") as SlotProxyStub | undefined;
 
     const env: Record<string, unknown> = { ...spec.vars, ...runtimeVars };
     for (const [bindingName, desc] of Object.entries(spec.bindings)) {
       switch (desc.kind) {
         case "d1":
-          env[bindingName] = createRunD1Binding((op: RunD1Operation) =>
-            invokeSupervisorBridge(supervisor, secret, runId, fence, `d1:${desc.sup}`, op),
-          );
-          break;
         case "kv":
-          env[bindingName] = createRunKVBinding((op: RunKVOperation) =>
-            invokeSupervisorBridge(supervisor, secret, runId, fence, `kv:${desc.sup}`, op),
-          );
-          break;
         case "r2":
-          env[bindingName] = createRunR2Binding((op: RunR2Operation) =>
-            invokeSupervisorBridge(supervisor, secret, runId, fence, `r2:${desc.sup}`, op),
-          );
+        case "send_email":
+        case "analytics_engine":
+          env[bindingName] = rawEnv[desc.sup] ? fenceNativeBinding(rawEnv[desc.sup], fence) : undefined;
           break;
         case "queue":
-          env[bindingName] = createRunQueueBinding((op: RunQueueOperation) =>
-            invokeSupervisorBridge(supervisor, secret, runId, fence, `queue:${desc.sup}`, op),
-          );
+          env[bindingName] = rawEnv[desc.sup] ? fenceQueueBinding(rawEnv[desc.sup], runId, fence) : undefined;
           break;
-        case "do": {
-          const queues = new Map<string, Promise<unknown>>();
-          env[bindingName] = createRunDurableObjectNamespace((op: RunDurableObjectOperation) => {
-            const key = JSON.stringify(op.target);
-            const prev = queues.get(key) ?? Promise.resolve();
-            const next = prev
-              .catch(() => {})
-              .then(() => invokeSupervisorBridge(supervisor, secret, runId, fence, `do:${desc.sup}`, op));
-            queues.set(key, next);
-            return next;
-          });
+        case "do":
+          env[bindingName] = rawEnv[desc.sup]
+            ? fenceDurableObjectBinding(rawEnv[desc.sup], desc.sup, slotProxy, runId, fence)
+            : undefined;
           break;
-        }
         case "ratelimit":
-          env[bindingName] = createRunRateLimitBinding((op: RunRateLimitOperation) =>
-            invokeSupervisorBridge(supervisor, secret, runId, fence, `ratelimit:${desc.sup}`, op),
-          );
+          env[bindingName] = rawEnv[desc.sup] ? fenceRateLimitBinding(rawEnv[desc.sup], runId, fence) : undefined;
           break;
         case "service":
           env[bindingName] = {
             fetch: (input: RequestInfo | URL, init?: RequestInit) => dispatchWorkerFetch(desc.target, input, init),
           };
           break;
-        case "send_email":
-          env[bindingName] = {
-            send: (message: unknown) =>
-              invokeSupervisorBridge(supervisor, secret, runId, fence, `email:${desc.sup}`, message),
-          };
-          break;
-        case "analytics_engine":
-          env[bindingName] = {
-            writeDataPoint: (event?: unknown) => {
-              void invokeSupervisorBridge(supervisor, secret, runId, fence, `ae:${desc.sup}`, event).catch(() => {});
-            },
-          };
-          break;
         case "native":
-          env[bindingName] = supervisorNativeEnv?.[desc.sup];
+          env[bindingName] = rawEnv[desc.sup];
           break;
       }
     }
@@ -421,17 +377,15 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
             [BTCF_RUN_ID_HEADER]: runId,
             [BTCF_WORKER_HEADER]: spec.name,
           },
-          body: JSON.stringify(
-            encodeBridgeValue({
-              queue: queueName,
-              messages: messages.map((message, index) => ({
-                id: message.id ?? `msg-${index}`,
-                timestamp: (message.timestamp ?? new Date()).getTime(),
-                attempts: message.attempts ?? 1,
-                body: message.body,
-              })),
-            }),
-          ),
+          body: JSON.stringify({
+            queue: queueName,
+            messages: messages.map((message, index) => ({
+              id: message.id ?? `msg-${index}`,
+              timestamp: (message.timestamp ?? new Date()).getTime(),
+              attempts: message.attempts ?? 1,
+              body: message.body,
+            })),
+          }),
         });
         if (!response.ok) {
           throw new Error(`Queue dispatch failed (${response.status}): ${await response.text()}`);

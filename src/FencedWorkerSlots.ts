@@ -38,7 +38,6 @@ export type FencedWorkerSlots = {
 
 const RUNTIME_FILES = [
   "WorkerdCache.ts",
-  "WorkerdCodec.ts",
   "WorkerdD1.ts",
   "WorkerdDurableObject.ts",
   "WorkerdKV.ts",
@@ -726,9 +725,7 @@ import {
   clearR2Bucket,
   clearRunCaches,
   clearRunDurableObjects,
-  decodeBridgeValue,
   dispatchRunQueue,
-  encodeBridgeValue,
   encodeScopedObjectName,
   executeRunCacheOperation,
   executeRunD1Operation,
@@ -880,112 +877,6 @@ export class SlotBindingProxy extends RunBindingProxy {
   }
 }
 
-const decodeHttpOperation = async (request) => {
-  const metaHeader = request.headers.get(${JSON.stringify(BTCF_META_HEADER)});
-  const hasBinaryBody = metaHeader !== null;
-  const parsed = hasBinaryBody ? JSON.parse(decodeURIComponent(metaHeader)) : await request.json();
-  const name = parsed.name;
-  const op = parsed.op;
-
-  if (name === "cache") {
-    const req = new Request(op.request.url, { method: op.request.method, headers: op.request.headers });
-    if (op.method === "put") {
-      const bytes = await request.arrayBuffer();
-      const status = op.response.status;
-      const isNullBody = status === 101 || status === 204 || status === 205 || status === 304;
-      const resp = new Response(isNullBody ? null : bytes, {
-        status,
-        statusText: op.response.statusText,
-        headers: op.response.headers,
-      });
-      return { name, op: { cacheName: op.cacheName, method: "put", request: req, response: resp } };
-    }
-    return { name, op: { cacheName: op.cacheName, method: op.method, request: req, options: op.options } };
-  }
-  if (name.startsWith("r2:")) {
-    if (op.method === "put") {
-      if (!op.hasBody) return { name, op: { method: "put", key: op.key, value: null, options: op.options } };
-      if (op.isString) {
-        return { name, op: { method: "put", key: op.key, value: await request.text(), options: op.options } };
-      }
-      return { name, op: { method: "put", key: op.key, value: await request.arrayBuffer(), options: op.options } };
-    }
-    if (op.method === "multipartUploadPart") {
-      return {
-        name,
-        op: {
-          method: "multipartUploadPart",
-          key: op.key,
-          uploadId: op.uploadId,
-          partNumber: op.partNumber,
-          value: await request.arrayBuffer(),
-        },
-      };
-    }
-  }
-  if (name.startsWith("kv:") && op.method === "put") {
-    const value = op.valueKind === "string" ? await request.text() : await request.arrayBuffer();
-    return { name, op: { method: "put", key: op.key, value, options: op.options } };
-  }
-  if (name.startsWith("do:") && op.method === "fetch") {
-    const body = hasBinaryBody ? await request.arrayBuffer() : undefined;
-    const req = new Request(op.request.url, { method: op.request.method, headers: op.request.headers, body });
-    return { name, op: { method: "fetch", target: op.target, request: req } };
-  }
-  return { name, op: decodeBridgeValue(op) };
-};
-
-const encodeHttpResult = async (result) => {
-  if (result === undefined) return new Response(null, { status: 204 });
-  if (result instanceof Response) {
-    const body = await result.arrayBuffer();
-    const meta = {
-      __btcf_kind: "response",
-      status: result.status,
-      statusText: result.statusText,
-      headers: [...result.headers],
-    };
-    return new Response(body, {
-      status: 200,
-      headers: { [ ${JSON.stringify(BTCF_META_HEADER)} ]: encodeURIComponent(JSON.stringify(encodeBridgeValue(meta))) },
-    });
-  }
-  if (result !== null && typeof result === "object") {
-    if ("response" in result && result.response instanceof Response && "key" in result) {
-      const { response, ...rest } = result;
-      const body = await response.arrayBuffer();
-      const meta = { __btcf_kind: "r2-object", object: rest };
-      return new Response(body, {
-        status: 200,
-        headers: { [ ${JSON.stringify(BTCF_META_HEADER)} ]: encodeURIComponent(JSON.stringify(encodeBridgeValue(meta))) },
-      });
-    }
-    if ("__btcf_stream" in result && result.response instanceof Response) {
-      const body = await result.response.arrayBuffer();
-      const meta = { __btcf_kind: "kv-stream" };
-      return new Response(body, {
-        status: 200,
-        headers: { [ ${JSON.stringify(BTCF_META_HEADER)} ]: encodeURIComponent(JSON.stringify(meta)) },
-      });
-    }
-    if (
-      "value" in result &&
-      result.value !== null &&
-      typeof result.value === "object" &&
-      "__btcf_stream" in result.value &&
-      result.value.response instanceof Response
-    ) {
-      const body = await result.value.response.arrayBuffer();
-      const meta = { __btcf_kind: "kv-stream-meta", metadata: result.metadata, cacheStatus: result.cacheStatus };
-      return new Response(body, {
-        status: 200,
-        headers: { [ ${JSON.stringify(BTCF_META_HEADER)} ]: encodeURIComponent(JSON.stringify(encodeBridgeValue(meta))) },
-      });
-    }
-  }
-  return Response.json(encodeBridgeValue(result));
-};
-
 export default {
   async fetch(request, env, ctx) {
     if (request.headers.get(${JSON.stringify(BTCF_SECRET_HEADER)}) !== SECRET) {
@@ -1003,18 +894,36 @@ export default {
       await proxy.retire();
       return new Response(null, { status: 204 });
     }
-    if (url.pathname === "/__btcf/env") {
+    if (url.pathname === "/__btcf/cache") {
       const runId = request.headers.get(${JSON.stringify(BTCF_RUN_ID_HEADER)});
-      try {
-        const { name, op } = await decodeHttpOperation(request);
-        const result = await proxy.invoke(runId, { name, args: [op] });
-        return await encodeHttpResult(result);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const name = error instanceof Error ? error.name : "Error";
-        const status = message.includes(runEnded) ? 410 : 500;
-        return Response.json({ __btcf_error: { name, message } }, { status });
+      const metaHeader = request.headers.get(${JSON.stringify(BTCF_META_HEADER)});
+      const op = metaHeader !== null ? JSON.parse(decodeURIComponent(metaHeader)) : await request.json();
+      const cacheReq = new Request(op.request.url, { method: op.request.method, headers: op.request.headers });
+      let cacheOp;
+      if (op.method === "put") {
+        const bytes = await request.arrayBuffer();
+        const status = op.response.status;
+        const isNullBody = status === 101 || status === 204 || status === 205 || status === 304;
+        const resp = new Response(isNullBody ? null : bytes, {
+          status,
+          statusText: op.response.statusText,
+          headers: op.response.headers,
+        });
+        cacheOp = { cacheName: op.cacheName, method: "put", request: cacheReq, response: resp };
+      } else {
+        cacheOp = { cacheName: op.cacheName, method: op.method, request: cacheReq, options: op.options };
       }
+      const result = await proxy.invoke(runId, { name: "cache", args: [cacheOp] });
+      if (result === undefined) return new Response(null, { status: 204 });
+      if (result instanceof Response) {
+        const body = await result.arrayBuffer();
+        const meta = { status: result.status, statusText: result.statusText, headers: [...result.headers] };
+        return new Response(body, {
+          status: 200,
+          headers: { [${JSON.stringify(BTCF_META_HEADER)}]: encodeURIComponent(JSON.stringify(meta)) },
+        });
+      }
+      return Response.json(result);
     }
     if (url.pathname === "/__btcf/dispatch/scheduled") {
       const runId = request.headers.get(${JSON.stringify(BTCF_RUN_ID_HEADER)});
@@ -1029,7 +938,7 @@ export default {
       const runId = request.headers.get(${JSON.stringify(BTCF_RUN_ID_HEADER)});
       const workerName = request.headers.get(${JSON.stringify(BTCF_WORKER_HEADER)});
       if (!(await proxy.isActive(runId))) return new Response(runEnded, { status: 410 });
-      const payload = decodeBridgeValue(await request.json());
+      const payload = await request.json();
       const worker = await loadDynamicWorker(env, ctx, runId, workerName);
       const outcome = await worker.getEntrypoint().__btcf_queue(payload);
       return Response.json(outcome);
