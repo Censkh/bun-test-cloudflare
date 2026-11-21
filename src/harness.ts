@@ -45,7 +45,6 @@ import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrche
 import { onCreatingScopeEnd } from "./TestScope";
 import { getWorkerBuildCacheDir, restoreCachedBuild, storeBuild } from "./WorkerBuildCache";
 import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
-import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots } from "./WorkerSlots";
 import { installWranglerPatches } from "./wranglerPatches";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
@@ -814,12 +813,8 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
           return workerPlans.map((worker, index) => prepareWorkerInput(worker, buildResults[index]!));
         })();
   logTiming("worker builds", buildStartedAt);
-  const supportsFencedWorkerSlots =
-    configuredIsolatedWorkerSlots === 1 ? false : canUseFencedWorkerSlots(preparedWorkers);
   const supportsIsolatedWorkerSlots =
-    configuredIsolatedWorkerSlots === 1
-      ? false
-      : supportsFencedWorkerSlots || canUseIsolatedWorkerSlots(preparedWorkers);
+    configuredIsolatedWorkerSlots === 1 ? false : canUseFencedWorkerSlots(preparedWorkers);
   const isolatedWorkerSlots =
     configuredIsolatedWorkerSlots ?? (supportsIsolatedWorkerSlots ? DEFAULT_ISOLATED_WORKER_SLOTS : 1);
 
@@ -828,29 +823,21 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   }
 
   const fencedSlots =
-    isolatedWorkerSlots > 1 && supportsFencedWorkerSlots
-      ? createFencedWorkerSlots(preparedWorkers, isolatedWorkerSlots)
-      : undefined;
-  const workerSlots =
-    isolatedWorkerSlots > 1 && !fencedSlots
-      ? createIsolatedWorkerSlots(preparedWorkers, isolatedWorkerSlots)
-      : undefined;
+    isolatedWorkerSlots > 1 ? createFencedWorkerSlots(preparedWorkers, isolatedWorkerSlots) : undefined;
 
   const testHarnessOptions = {
     ...serverConfig,
-    workers: fencedSlots?.inputs ?? workerSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
+    workers: fencedSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
   };
   const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
-      cacheBridgeSecret: workerSlots?.secret,
       events,
       fencedSlots,
       hasBrowserRendering,
       preparedWorkers,
       testHarnessOptions,
       workerEntries,
-      workerSlotNames: workerSlots?.workerNames,
     });
   // The Workers are built now, so building never counts against a test's timeout, but workerd starts
   // on the first run: a module can create a harness that a test file importing it never runs.

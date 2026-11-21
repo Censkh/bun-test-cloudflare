@@ -4,11 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { semver } from "bun";
 import {
-  canUseIsolatedWorkerSlots,
-  createIsolatedWorkerSlots,
+  canUseFencedWorkerSlots,
+  cleanupFencedWorkerSlots,
+  createFencedWorkerSlots,
   isSupportedSlotBinding,
   wranglerKeepsSecondaryRateLimits,
-} from "../src/WorkerSlots";
+} from "../src/FencedWorkerSlots";
 
 const installedWranglerKeepsSecondaryRateLimits = semver.satisfies(
   (require("wrangler/package.json") as { version: string }).version,
@@ -17,9 +18,9 @@ const installedWranglerKeepsSecondaryRateLimits = semver.satisfies(
 
 const workerInput = (config: Record<string, unknown>) => ({ input: { config } as any, name: "worker" });
 
-test("isolated Worker slots accept resettable storage and immutable value bindings", () => {
+test("fenced Worker slots accept resettable storage and immutable value bindings", () => {
   expect(
-    canUseIsolatedWorkerSlots([
+    canUseFencedWorkerSlots([
       workerInput({
         d1_databases: [{ binding: "DB", database_id: "database", database_name: "database" }],
         durable_objects: { bindings: [{ class_name: "Counter", name: "COUNTER" }] },
@@ -32,9 +33,7 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
   ).toBeTrue();
 });
 
-test("isolated Worker slots accept queues, static assets and bindings every slot can share", () => {
-  // Bindings as Wrangler converts them; checked directly so a mocked Wrangler elsewhere in the run can't
-  // change the result.
+test("fenced Worker slots accept queues, static assets and bindings every slot can share", () => {
   const workerNames = new Set(["worker"]);
   for (const binding of [
     { dataset: "events", type: "analytics_engine" },
@@ -53,7 +52,7 @@ test("isolated Worker slots accept queues, static assets and bindings every slot
 const rateLimit = { namespace_id: "1001", simple: { limit: 5, period: 60 }, type: "ratelimit" };
 
 test.skipIf(!installedWranglerKeepsSecondaryRateLimits)(
-  "isolated Worker slots accept rate limits with a namespace on Wrangler 4.108 and later",
+  "fenced Worker slots accept rate limits with a namespace on Wrangler 4.108 and later",
   () => {
     const workerNames = new Set(["worker"]);
     expect(isSupportedSlotBinding(rateLimit, workerNames)).toBeTrue();
@@ -62,7 +61,7 @@ test.skipIf(!installedWranglerKeepsSecondaryRateLimits)(
 );
 
 test.skipIf(installedWranglerKeepsSecondaryRateLimits)(
-  "isolated Worker slots reject rate limits before Wrangler 4.108, which drops them from every slot but the first",
+  "fenced Worker slots reject rate limits before Wrangler 4.108, which drops them from every slot but the first",
   () => {
     expect(isSupportedSlotBinding(rateLimit, new Set(["worker"]))).toBeFalse();
   },
@@ -75,24 +74,18 @@ test("only Wrangler 4.108 and later keep the rate limits of Workers other than t
   expect(wranglerKeepsSecondaryRateLimits("4.152.0")).toBeTrue();
 });
 
-test("isolated Worker slots accept Workflows of their own Workers only", () => {
-  const workerNames = new Set(["worker"]);
-  const workflow = { class_name: "Flow", name: "flow", type: "workflow" };
-  expect(isSupportedSlotBinding(workflow, workerNames)).toBeTrue();
-  expect(isSupportedSlotBinding({ ...workflow, script_name: "worker" }, workerNames)).toBeTrue();
-  expect(isSupportedSlotBinding({ ...workflow, script_name: "elsewhere" }, workerNames)).toBeFalse();
-  expect(isSupportedSlotBinding({ class_name: "Flow", type: "workflow" }, workerNames)).toBeFalse();
-});
-
-test("isolated Worker slots reject unsupported and unidentified storage bindings", () => {
+test("fenced Worker slots reject unsupported, workflow, container, and unidentified storage bindings", () => {
   expect(
-    canUseIsolatedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
+    canUseFencedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
   ).toBeFalse();
-  expect(canUseIsolatedWorkerSlots([workerInput({ kv_namespaces: [{ binding: "KV" }] })])).toBeFalse();
-  expect(canUseIsolatedWorkerSlots([workerInput({ containers: [{ class_name: "ContainerWorker" }] })])).toBeFalse();
+  expect(canUseFencedWorkerSlots([workerInput({ kv_namespaces: [{ binding: "KV" }] })])).toBeFalse();
+  expect(canUseFencedWorkerSlots([workerInput({ containers: [{ class_name: "ContainerWorker" }] })])).toBeFalse();
+  expect(
+    canUseFencedWorkerSlots([workerInput({ workflows: [{ binding: "FLOW", class_name: "Flow", name: "flow" }] })]),
+  ).toBeFalse();
 });
 
-test("isolated Worker slots support cyclic Worker bindings", () => {
+test("fenced Worker slots support cyclic Worker bindings", () => {
   const workers = [
     {
       input: {
@@ -118,16 +111,17 @@ test("isolated Worker slots support cyclic Worker bindings", () => {
     },
   ];
 
-  expect(canUseIsolatedWorkerSlots(workers)).toBeTrue();
+  expect(canUseFencedWorkerSlots(workers)).toBeTrue();
 });
 
-test("isolated Worker slots rewrite internal service and Durable Object targets", () => {
+test("fenced Worker slots create per-slot supervisors and native Durable Object hosts", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-services-"));
   const main = path.join(root, "worker.js");
-  fs.writeFileSync(main, "export default { fetch() { return new Response('ok'); } };\n");
+  fs.writeFileSync(main, "export class Counter {}\nexport default { fetch() { return new Response('ok'); } };\n");
 
+  let cleanupDir: string | undefined;
   try {
-    const slots = createIsolatedWorkerSlots(
+    const slots = createFencedWorkerSlots(
       [
         {
           input: {
@@ -136,12 +130,6 @@ test("isolated Worker slots rewrite internal service and Durable Object targets"
                 bindings: [{ class_name: "Counter", name: "COUNTER", script_name: "service-worker" }],
               },
               main,
-              migrations: [
-                {
-                  tag: "v1",
-                  transferred_classes: [{ from: "Counter", from_script: "service-worker", to: "TransferredCounter" }],
-                },
-              ],
               name: "entry-worker",
               services: [{ binding: "SERVICE", service: "service-worker" }],
             },
@@ -149,31 +137,56 @@ test("isolated Worker slots rewrite internal service and Durable Object targets"
           name: "entry-worker",
         },
         {
-          input: { config: { main, name: "service-worker" } } as any,
+          input: {
+            config: {
+              main,
+              migrations: [{ tag: "v1", new_sqlite_classes: ["Counter"] }],
+              name: "service-worker",
+            },
+          } as any,
           name: "service-worker",
         },
       ],
       2,
     );
-    const firstEntryConfig = (slots.inputs[0] as any).config;
-    const secondEntryConfig = (slots.inputs[2] as any).config;
+    cleanupDir = slots.cleanupDir;
 
-    expect(firstEntryConfig.services[0].service).toBe("service-worker--btcf-slot-0");
-    expect(secondEntryConfig.services[0].service).toBe("service-worker--btcf-slot-1");
-    expect(firstEntryConfig.durable_objects.bindings[0].script_name).toBe("service-worker--btcf-slot-0");
-    expect(firstEntryConfig.migrations[0].transferred_classes[0].from_script).toBe("service-worker--btcf-slot-0");
+    expect(slots.slotSupervisorNames).toEqual(["__btcf-supervisor--slot-0", "__btcf-supervisor--slot-1"]);
+    const slot0Supervisor = (slots.inputs[0] as any).config;
+    const slot0DoHost = (slots.inputs[1] as any).config;
+    const slot1Supervisor = (slots.inputs[2] as any).config;
+    const slot1DoHost = (slots.inputs[3] as any).config;
+
+    expect(slot0Supervisor.name).toBe("__btcf-supervisor--slot-0");
+    expect(slot1Supervisor.name).toBe("__btcf-supervisor--slot-1");
+    expect(slot0DoHost.name).toBe("service-worker--btcf-do-0");
+    expect(slot1DoHost.name).toBe("service-worker--btcf-do-1");
+    expect(slot0Supervisor.durable_objects.bindings).toContainEqual({
+      name: "DO_0",
+      class_name: "Counter",
+      script_name: "service-worker--btcf-do-0",
+    });
+    expect(slot1Supervisor.durable_objects.bindings).toContainEqual({
+      name: "DO_0",
+      class_name: "Counter",
+      script_name: "service-worker--btcf-do-1",
+    });
+    expect(slots.workerSpecs[0]?.bindings.SERVICE).toEqual({ kind: "service", target: "service-worker" });
+    expect(slots.workerSpecs[0]?.bindings.COUNTER).toEqual({ kind: "do", sup: "DO_0" });
   } finally {
+    cleanupFencedWorkerSlots(cleanupDir);
     fs.rmSync(root, { force: true, recursive: true });
   }
 });
 
-test("isolated Worker slots clone storage identities and generate cache wrappers", () => {
+test("fenced Worker slots isolate per-slot storage, queue, and rate limit identities on supervisors", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-slots-"));
   const main = path.join(root, "worker.js");
   fs.writeFileSync(main, "export default { fetch() { return new Response('ok'); } };\n");
 
+  let cleanupDir: string | undefined;
   try {
-    const slots = createIsolatedWorkerSlots(
+    const slots = createFencedWorkerSlots(
       [
         workerInput({
           d1_databases: [{ binding: "DB", database_id: "database", database_name: "database" }],
@@ -187,19 +200,15 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
           },
           r2_buckets: [{ binding: "BUCKET", bucket_name: "bucket" }],
           ratelimits: [{ name: "LIMITER", namespace_id: "1001", simple: { limit: 5, period: 60 } }],
-          rules: [{ globs: ["**/*.wasm"], type: "CompiledWasm" }],
-          workflows: [
-            { binding: "FLOW", class_name: "Flow", name: "flow" },
-            { binding: "OWN", class_name: "Flow", name: "own", script_name: "worker" },
-          ],
         }),
       ],
       2,
     );
+    cleanupDir = slots.cleanupDir;
     const firstConfig = (slots.inputs[0] as any).config;
     const secondConfig = (slots.inputs[1] as any).config;
 
-    expect(slots.workerNames).toEqual([["worker--btcf-slot-0", "worker--btcf-slot-1"]]);
+    expect(slots.slotSupervisorNames).toEqual(["__btcf-supervisor--slot-0", "__btcf-supervisor--slot-1"]);
     expect(firstConfig.kv_namespaces[0].id).toBe("namespace--btcf-slot-0");
     expect(secondConfig.kv_namespaces[0].id).toBe("namespace--btcf-slot-1");
     expect(firstConfig.d1_databases[0].database_id).toBe("database--btcf-slot-0");
@@ -210,19 +219,8 @@ test("isolated Worker slots clone storage identities and generate cache wrappers
       queue: "jobs--btcf-slot-1",
     });
     expect(firstConfig.ratelimits[0].namespace_id).not.toBe(secondConfig.ratelimits[0].namespace_id);
-    // Each slot runs its own Workflow instances, in its own Worker.
-    expect(secondConfig.workflows).toEqual([
-      { binding: "FLOW", class_name: "Flow", name: "flow--btcf-slot-1" },
-      { binding: "OWN", class_name: "Flow", name: "own--btcf-slot-1", script_name: "worker--btcf-slot-1" },
-    ]);
-    expect(fs.readFileSync(firstConfig.main, "utf8")).toContain("cache-namespace.js");
-    expect(firstConfig.rules[0]).toEqual({
-      fallthrough: true,
-      globs: ["worker.js", path.basename(firstConfig.main).replace(".cache-bridge.js", ".cache-namespace.js")],
-      type: "ESModule",
-    });
-    expect(firstConfig.rules[1]).toEqual({ globs: ["**/*.wasm"], type: "CompiledWasm" });
   } finally {
+    cleanupFencedWorkerSlots(cleanupDir);
     fs.rmSync(root, { force: true, recursive: true });
   }
 });

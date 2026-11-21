@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { semver } from "bun";
 import type { TestHarnessOptions } from "wrangler";
 import { unstable_convertConfigBindingsToStartWorkerBindings } from "wrangler";
 import {
@@ -23,7 +24,6 @@ import {
   type FencedBindingDescriptor,
   type FencedWorkerSpec,
 } from "./FencedEnvBridge";
-import { isSupportedSlotBinding } from "./WorkerSlots";
 
 type WorkerInput = TestHarnessOptions["workers"][number];
 type InlineWorkerInput = Extract<WorkerInput, { config: unknown }>;
@@ -71,6 +71,51 @@ const getInlineConfig = (input: WorkerInput) => {
   return input.config as Record<string, any>;
 };
 
+const SHARED_SLOT_BINDINGS = new Set([
+  "analytics_engine",
+  "assets",
+  "browser",
+  "hyperdrive",
+  "images",
+  "json",
+  "plain_text",
+  "send_email",
+  "version_metadata",
+]);
+
+/**
+ * Wrangler before 4.108 deletes the rate limits of every Worker but its primary one when it merges
+ * their Miniflare options, so a rate limit in any slot past the first was undefined.
+ */
+export const wranglerKeepsSecondaryRateLimits = (wranglerVersion: string) =>
+  semver.satisfies(wranglerVersion, ">=4.108.0");
+
+const slotsKeepRateLimits = wranglerKeepsSecondaryRateLimits(
+  (require("wrangler/package.json") as { version: string }).version,
+);
+
+export const isSupportedSlotBinding = (
+  binding: { [key: string]: unknown; type: string },
+  workerNames: Set<string>,
+): boolean => {
+  if (binding.type === "d1") return typeof binding.database_id === "string";
+  if (binding.type === "kv_namespace") return typeof binding.id === "string";
+  if (binding.type === "r2_bucket") return typeof binding.bucket_name === "string";
+  if (binding.type === "durable_object_namespace") {
+    return (
+      typeof binding.class_name === "string" &&
+      (binding.script_name === undefined ||
+        (typeof binding.script_name === "string" && workerNames.has(binding.script_name)))
+    );
+  }
+  if (binding.type === "service") {
+    return typeof binding.service === "string" && workerNames.has(binding.service);
+  }
+  if (binding.type === "queue") return typeof binding.queue_name === "string";
+  if (binding.type === "ratelimit") return slotsKeepRateLimits && typeof binding.namespace_id === "string";
+  return SHARED_SLOT_BINDINGS.has(binding.type);
+};
+
 export const canUseFencedWorkerSlots = (workers: Array<{ input: WorkerInput; name: string }>): boolean => {
   const workerNames = new Set(workers.map((worker) => worker.name));
   try {
@@ -79,10 +124,9 @@ export const canUseFencedWorkerSlots = (workers: Array<{ input: WorkerInput; nam
       if (Array.isArray(config.containers) && config.containers.length > 0) return false;
       if (Array.isArray(config.workflows) && config.workflows.length > 0) return false;
       const bindings = unstable_convertConfigBindingsToStartWorkerBindings(config);
-      return Object.values(bindings).every((binding) => {
-        const typed = binding as { [key: string]: unknown; type: string };
-        return typed.type !== "workflow" && isSupportedSlotBinding(typed, workerNames);
-      });
+      return Object.values(bindings).every((binding) =>
+        isSupportedSlotBinding(binding as { [key: string]: unknown; type: string }, workerNames),
+      );
     });
   } catch {
     return false;

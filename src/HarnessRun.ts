@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { TestHarness, TestHarnessOptions } from "wrangler";
 import { createTestHarness } from "wrangler";
-import { createWorkerCacheStorage, getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
+import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import {
   activateFencedSlot,
   createFencedBunCacheStorage,
@@ -49,14 +49,12 @@ export type CloudflareHarnessRunContext<TWorkers extends Record<string, Cloudfla
 };
 
 type HarnessRunOptions<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
-  cacheBridgeSecret?: string;
   events: CloudflareHarnessConfig<TWorkers>["events"];
   fencedSlots?: FencedWorkerSlots;
   hasBrowserRendering: boolean;
   preparedWorkers: PreparedWorkerInput[];
   testHarnessOptions: Omit<TestHarnessOptions, "workers"> & { workers: WorkerInput[] };
   workerEntries: Array<[keyof TWorkers, CloudflareWorkerConfig]>;
-  workerSlotNames?: string[][];
 };
 
 // Crash detection needs the spawn hook even when the setup preload isn't used.
@@ -330,8 +328,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   }
 
   canRotateWorkerSlotForReuse() {
-    if (this.options.fencedSlots) return true;
-    return this.#activeWorkerSlot + 1 < (this.options.workerSlotNames?.[0]?.length ?? 1);
+    return this.options.fencedSlots !== undefined;
   }
 
   async resetForReuse() {
@@ -365,17 +362,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
 
     await this.#untilRuntimeCrash(this.#settleBackgroundWork());
     this.#logStream.flush();
-    if (this.canRotateWorkerSlotForReuse()) {
-      const slotStartedAt = performance.now();
-      this.#activeWorkerSlot += 1;
-      this.#fence = new RunFence();
-      this.#context = this.#createContext();
-      this.#cacheStorage = await this.#getCacheStorage();
-      logTiming(`${this.#timingLabel} reset:slot`, slotStartedAt);
-    } else {
-      this.#activeWorkerSlot = 0;
-      await this.#untilRuntimeCrash(this.#resetWorkerGeneration());
-    }
+    await this.#untilRuntimeCrash(this.#resetWorkerGeneration());
     this.#server.clearLogs();
     logTiming(`${this.#timingLabel} reset`, startedAt);
   }
@@ -558,10 +545,8 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     }
 
     const workers = Object.fromEntries(
-      this.options.workerEntries.map(([key, worker], workerIndex) => {
-        const workerName =
-          this.options.workerSlotNames?.[workerIndex]?.[this.#activeWorkerSlot] ?? worker.name ?? String(key);
-        const handle = this.#fence.worker(this.#server.getWorker(workerName));
+      this.options.workerEntries.map(([key, worker]) => {
+        const handle = this.#fence.worker(this.#server.getWorker(worker.name ?? String(key)));
         return [key, handle];
       }),
     ) as unknown as CloudflareWorkerMap<TWorkers>;
@@ -574,19 +559,11 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       const supervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
       return createFencedBunCacheStorage(supervisor, secret, this.#fencedRunId, this.#fence);
     }
-    if (this.options.cacheBridgeSecret && this.#context) {
-      const primaryWorker = Object.values(this.#context.workers)[0];
-      if (primaryWorker) {
-        return createWorkerCacheStorage(primaryWorker, this.options.cacheBridgeSecret);
-      }
-    }
     return getCapturedRuntimeCaches(this.#capturedDevEnvs);
   }
 
   #getExposedServer(workers: CloudflareWorkerMap<TWorkers>): TestHarness {
     const fence = this.#fence;
-    const slot = this.#activeWorkerSlot;
-    const slotNames = this.options.workerSlotNames;
     const fencedSlots = this.options.fencedSlots;
     const call = <T>(callback: () => T): T => {
       fence.assertActive();
@@ -595,7 +572,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     return {
       listen: () => fence.dispatch(() => this.#server.listen()),
       fetch: (input, init) => {
-        const primary = (slotNames || fencedSlots) && Object.values(workers)[0];
+        const primary = fencedSlots && Object.values(workers)[0];
         if (primary) return primary.fetch(input, init);
         return fence.dispatch(() => this.#server.fetch(input, init));
       },
@@ -607,7 +584,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
           const [key] = this.options.workerEntries[index]!;
           return workers[key] as any;
         }
-        return fence.worker(this.#server.getWorker(slotNames?.[index]?.[slot] ?? name));
+        return fence.worker(this.#server.getWorker(name));
       },
       getLogs: () => call(() => this.#server.getLogs()),
       clearLogs: () => call(() => this.#server.clearLogs()),
@@ -652,15 +629,13 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       return;
     }
 
-    for (const [index, preparedWorker] of this.options.preparedWorkers.entries()) {
+    for (const preparedWorker of this.options.preparedWorkers) {
       const browserBindingName = preparedWorker.browserBindingName;
       if (!browserBindingName) {
         continue;
       }
 
-      const worker = this.#server.getWorker(
-        this.options.workerSlotNames?.[index]?.[this.#activeWorkerSlot] ?? preparedWorker.name,
-      );
+      const worker = this.#server.getWorker(preparedWorker.name);
 
       try {
         const env = (await worker.getEnv()) as Record<string, unknown>;

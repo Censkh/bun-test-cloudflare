@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { semver } from "bun";
 import { unstable_convertConfigBindingsToStartWorkerBindings } from "wrangler";
-import { canUseIsolatedWorkerSlots, isSupportedSlotBinding } from "../../../src/WorkerSlots";
+import { canUseFencedWorkerSlots, isSupportedSlotBinding } from "../../../src/FencedWorkerSlots";
 
 test("classifies every binding kind emitted by Wrangler for isolated slots", () => {
   const config = {
@@ -118,10 +118,9 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     "send_email",
     "service",
     "version_metadata",
-    "workflow",
   ]);
   expect(
-    canUseIsolatedWorkerSlots([
+    canUseFencedWorkerSlots([
       {
         input: { config } as never,
         name: "binding-catalog",
