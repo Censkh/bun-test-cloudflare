@@ -110,3 +110,31 @@ test("fenced R2 preserves bytes, range requests, preconditions, listings and met
     expect(await proxied.json()).toEqual(expected);
   });
 });
+
+test("fenced Cache API matches native responses and separates cache entries across runs", async () => {
+  await harness.run(async ({ HOST }) => {
+    const { DB } = await HOST.getEnv();
+    await DB.exec("CREATE TABLE effects (slot TEXT, run TEXT, source TEXT)");
+    expect((await HOST.fetch("https://example.test/activate/a/cache-old")).status).toBe(204);
+    const native = await HOST.fetch("https://example.test/native-cache");
+    const proxied = await HOST.fetch("https://example.test/cache/a/cache-old");
+    if (!native.ok) throw new Error(await native.text());
+    if (!proxied.ok) throw new Error(await proxied.text());
+    const expected = await native.json();
+    expect(expected).toMatchObject({
+      missing: true,
+      conditional: 304,
+      range: 206,
+      contentRange: "bytes 1-2/4",
+      bytes: [42, 127],
+      namedHit: "named",
+      deleted: true,
+      defaultSurvived: 4,
+    });
+    expect(await proxied.json()).toEqual(expected);
+    const hasCache = (run: string) => HOST.fetch(`https://example.test/cache/a/${run}`, { method: "HEAD" });
+    expect((await hasCache("cache-old")).status).toBe(200);
+    expect((await HOST.fetch("https://example.test/activate/a/cache-new")).status).toBe(204);
+    expect((await hasCache("cache-new")).status).toBe(404);
+  });
+});

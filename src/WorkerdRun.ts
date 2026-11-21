@@ -1,5 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
+export { createRunCacheStorage, executeRunCacheOperation, type RunCacheOperation } from "./WorkerdCache";
 export { createRunD1Binding, executeRunD1Operation, type RunD1Binding, type RunD1Operation } from "./WorkerdD1";
 export { createRunR2Binding, executeRunR2Operation, type RunR2Binding, type RunR2Operation } from "./WorkerdR2";
 

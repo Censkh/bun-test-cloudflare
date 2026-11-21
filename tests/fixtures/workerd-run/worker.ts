@@ -1,14 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  createRunCacheStorage,
   createRunD1Binding,
   createRunR2Binding,
   dispatchRunQueue,
+  executeRunCacheOperation,
   executeRunD1Operation,
   executeRunR2Operation,
   getRunAlarmOwner,
   loadRunWorker,
   RunBindingCapability,
   RunBindingProxy,
+  type RunCacheOperation,
   type RunD1Binding,
   type RunD1Operation,
   type RunOperation,
@@ -50,6 +53,7 @@ export class Slot extends RunBindingProxy<Env> {
     }
     if (name === "d1") return executeRunD1Operation(this.env.DB, args[0] as RunD1Operation);
     if (name === "r2") return executeRunR2Operation(this.env.BUCKET, args[0] as RunR2Operation);
+    if (name === "cache") return executeRunCacheOperation(caches, runId, args[0] as RunCacheOperation);
     const slot = this.ctx.id.name!;
     if (name === "effect") {
       await this.env.DB.prepare("INSERT INTO effects VALUES (?, ?, ?)").bind(slot, runId, args[0]).run();
@@ -91,6 +95,8 @@ ${createRunD1Binding.toString()}
 ${exerciseD1.toString()}
 ${createRunR2Binding.toString()}
 ${exerciseR2.toString()}
+${createRunCacheStorage.toString()}
+${exerciseCache.toString()}
 let requests = 0;
 export default {
   async fetch(request, env, ctx) {
@@ -101,6 +107,14 @@ export default {
     if (new URL(request.url).pathname.startsWith("/r2/")) {
       const bucket = createRunR2Binding((operation) => env.BINDINGS.invoke("r2", operation));
       return Response.json(await exerciseR2(bucket));
+    }
+    if (new URL(request.url).pathname.startsWith("/cache/")) {
+      const storage = createRunCacheStorage((operation) => env.BINDINGS.invoke("cache", operation));
+      if (request.method === "HEAD") {
+        const cached = await storage.default.match("https://cdn.example/asset");
+        return new Response(null, { status: cached ? 200 : 404 });
+      }
+      return Response.json(await exerciseCache(storage));
     }
     const { delay } = await request.json();
     if (delay !== null) {
@@ -166,11 +180,39 @@ async function exerciseR2(bucket: RunR2Binding) {
   };
 }
 
+async function exerciseCache(storage: ReturnType<typeof createRunCacheStorage>) {
+  const url = "https://cdn.example/asset";
+  const missing = (await storage.default.match(url)) === undefined;
+  const headers = {
+    "cache-control": "public, max-age=120",
+    etag: '"asset"',
+    "content-type": "application/octet-stream",
+  };
+  await storage.default.put(url, new Response(Uint8Array.of(0, 42, 127, 255), { headers }));
+  const conditional = await storage.default.match(new Request(url, { headers: { "if-none-match": '"asset"' } }));
+  const ranged = await storage.default.match(new Request(url, { headers: { range: "bytes=1-2" } }));
+  const named = await storage.open("media");
+  await named.put(url, new Response("named", { headers }));
+  const namedHit = await (await named.match(url))?.text();
+  const deleted = await named.delete(url);
+  return {
+    missing,
+    conditional: conditional?.status,
+    range: ranged?.status,
+    contentRange: ranged?.headers.get("content-range"),
+    bytes: [...new Uint8Array(await ranged!.arrayBuffer())],
+    namedHit,
+    deleted,
+    defaultSurvived: (await (await storage.default.match(url))?.arrayBuffer())?.byteLength,
+  };
+}
+
 export default {
   async fetch(request, env, ctx) {
     const [, action, slot, runId] = new URL(request.url).pathname.split("/");
     if (action === "native-d1") return Response.json(await exerciseD1(env.REFERENCE));
     if (action === "native-r2") return Response.json(await exerciseR2(env.NATIVE_BUCKET));
+    if (action === "native-cache") return Response.json(await exerciseCache(caches));
     const proxy = env.SLOTS.getByName(slot);
     if (action === "activate") {
       await proxy.activate(runId);
