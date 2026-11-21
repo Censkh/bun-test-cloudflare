@@ -1,6 +1,7 @@
 import { describe, expect } from "bun:test";
 import { readFileSync, rmSync } from "node:fs";
 import path from "node:path";
+import { semver } from "bun";
 import { getWorkerBuildCacheRoot } from "../src/WorkerBuildCache";
 import { bunFixtureTest, fixturePath } from "./fixtureRunner";
 
@@ -99,7 +100,12 @@ describe("Cloudflare harness fixture", () => {
     { mode: "in one process (Bun's default)", testArgs: [], runtimeStarts: 1 },
     { mode: "in one process with --isolate", testArgs: ["--isolate"], runtimeStarts: 2 },
     { mode: "in one worker", testArgs: ["--parallel=1"], runtimeStarts: 2 },
-    { mode: "in one worker with --no-isolate", testArgs: ["--parallel=1", "--no-isolate"], runtimeStarts: 1 },
+    {
+      mode: "in one worker with --no-isolate",
+      testArgs: ["--parallel=1", "--no-isolate"],
+      // Bun before 1.4 ignores --no-isolate with --parallel, so each file still has a global of its own.
+      runtimeStarts: semver.satisfies(Bun.version, ">=1.4.0") ? 1 : 2,
+    },
     { mode: "in two workers", testArgs: ["--parallel=2", "--parallel-delay=0"], runtimeStarts: 2 },
     {
       mode: "in two workers with --no-isolate",

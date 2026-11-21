@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { semver } from "bun";
 import { unstable_convertConfigBindingsToStartWorkerBindings } from "wrangler";
 import { canUseIsolatedWorkerSlots, isSupportedSlotBinding } from "../../../src/WorkerSlots";
 
@@ -99,6 +100,7 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     ].sort(),
   ).toEqual([
     "analytics_engine",
+    "assets",
     "browser",
     "d1",
     "durable_object_namespace",
@@ -109,9 +111,13 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     "plain_text",
     "queue",
     "r2_bucket",
-    "ratelimit",
+    // Wrangler before 4.108 drops the rate limits of every slot but the first.
+    ...(semver.satisfies((require("wrangler/package.json") as { version: string }).version, ">=4.108.0")
+      ? ["ratelimit"]
+      : []),
     "send_email",
     "service",
+    "version_metadata",
     "workflow",
   ]);
   expect(

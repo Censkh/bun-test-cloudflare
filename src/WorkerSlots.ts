@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import { semver } from "bun";
 import type { TestHarnessOptions } from "wrangler";
 import { unstable_convertConfigBindingsToStartWorkerBindings } from "wrangler";
 import { WORKER_CACHE_BRIDGE_PATH, WORKER_CACHE_BRIDGE_SECRET_HEADER } from "./CacheBridge";
@@ -27,6 +28,17 @@ const SHARED_SLOT_BINDINGS = new Set([
   "version_metadata",
 ]);
 
+/**
+ * Wrangler before 4.108 deletes the rate limits of every Worker but its primary one when it merges
+ * their Miniflare options, so a rate limit in any slot past the first was undefined.
+ */
+export const wranglerKeepsSecondaryRateLimits = (wranglerVersion: string) =>
+  semver.satisfies(wranglerVersion, ">=4.108.0");
+
+const slotsKeepRateLimits = wranglerKeepsSecondaryRateLimits(
+  (require("wrangler/package.json") as { version: string }).version,
+);
+
 export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: string }, workerNames: Set<string>) => {
   if (binding.type === "d1") return typeof binding.database_id === "string";
   if (binding.type === "kv_namespace") return typeof binding.id === "string";
@@ -52,7 +64,7 @@ export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: 
         (typeof binding.script_name === "string" && workerNames.has(binding.script_name)))
     );
   }
-  if (binding.type === "ratelimit") return typeof binding.namespace_id === "string";
+  if (binding.type === "ratelimit") return slotsKeepRateLimits && typeof binding.namespace_id === "string";
   // Shared by every slot, as they are by every generation: Hyperdrive reaches an outside database,
   // Browser Rendering a local browser whose sessions each reset closes, sent email and Analytics
   // Engine writes keep no state a Worker can read back, and static assets and version metadata are

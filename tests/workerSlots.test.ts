@@ -2,7 +2,18 @@ import { expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { canUseIsolatedWorkerSlots, createIsolatedWorkerSlots, isSupportedSlotBinding } from "../src/WorkerSlots";
+import { semver } from "bun";
+import {
+  canUseIsolatedWorkerSlots,
+  createIsolatedWorkerSlots,
+  isSupportedSlotBinding,
+  wranglerKeepsSecondaryRateLimits,
+} from "../src/WorkerSlots";
+
+const installedWranglerKeepsSecondaryRateLimits = semver.satisfies(
+  (require("wrangler/package.json") as { version: string }).version,
+  ">=4.108.0",
+);
 
 const workerInput = (config: Record<string, unknown>) => ({ input: { config } as any, name: "worker" });
 
@@ -21,7 +32,7 @@ test("isolated Worker slots accept resettable storage and immutable value bindin
   ).toBeTrue();
 });
 
-test("isolated Worker slots accept queues, rate limits, static assets and bindings every slot can share", () => {
+test("isolated Worker slots accept queues, static assets and bindings every slot can share", () => {
   // Bindings as Wrangler converts them; checked directly so a mocked Wrangler elsewhere in the run can't
   // change the result.
   const workerNames = new Set(["worker"]);
@@ -31,14 +42,37 @@ test("isolated Worker slots accept queues, rate limits, static assets and bindin
     { type: "browser" },
     { id: "hyperdrive", localConnectionString: "postgres://localhost/db", type: "hyperdrive" },
     { queue: "jobs", queue_name: "jobs", type: "queue" },
-    { namespace_id: "1001", simple: { limit: 5, period: 60 }, type: "ratelimit" },
     { type: "send_email" },
     { type: "version_metadata" },
   ]) {
     expect({ binding, supported: isSupportedSlotBinding(binding, workerNames) }).toEqual({ binding, supported: true });
   }
   expect(isSupportedSlotBinding({ type: "queue" }, workerNames)).toBeFalse();
-  expect(isSupportedSlotBinding({ type: "ratelimit" }, workerNames)).toBeFalse();
+});
+
+const rateLimit = { namespace_id: "1001", simple: { limit: 5, period: 60 }, type: "ratelimit" };
+
+test.skipIf(!installedWranglerKeepsSecondaryRateLimits)(
+  "isolated Worker slots accept rate limits with a namespace on Wrangler 4.108 and later",
+  () => {
+    const workerNames = new Set(["worker"]);
+    expect(isSupportedSlotBinding(rateLimit, workerNames)).toBeTrue();
+    expect(isSupportedSlotBinding({ type: "ratelimit" }, workerNames)).toBeFalse();
+  },
+);
+
+test.skipIf(installedWranglerKeepsSecondaryRateLimits)(
+  "isolated Worker slots reject rate limits before Wrangler 4.108, which drops them from every slot but the first",
+  () => {
+    expect(isSupportedSlotBinding(rateLimit, new Set(["worker"]))).toBeFalse();
+  },
+);
+
+test("only Wrangler 4.108 and later keep the rate limits of Workers other than the primary one", () => {
+  expect(wranglerKeepsSecondaryRateLimits("4.104.0")).toBeFalse();
+  expect(wranglerKeepsSecondaryRateLimits("4.107.0")).toBeFalse();
+  expect(wranglerKeepsSecondaryRateLimits("4.108.0")).toBeTrue();
+  expect(wranglerKeepsSecondaryRateLimits("4.152.0")).toBeTrue();
 });
 
 test("isolated Worker slots accept Workflows of their own Workers only", () => {
