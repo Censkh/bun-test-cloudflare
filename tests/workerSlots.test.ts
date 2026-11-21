@@ -33,6 +33,7 @@ test("isolated Worker slots accept queues, rate limits, static assets and bindin
     { queue: "jobs", queue_name: "jobs", type: "queue" },
     { namespace_id: "1001", simple: { limit: 5, period: 60 }, type: "ratelimit" },
     { type: "send_email" },
+    { type: "version_metadata" },
   ]) {
     expect({ binding, supported: isSupportedSlotBinding(binding, workerNames) }).toEqual({ binding, supported: true });
   }

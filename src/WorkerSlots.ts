@@ -24,6 +24,7 @@ const SHARED_SLOT_BINDINGS = new Set([
   "json",
   "plain_text",
   "send_email",
+  "version_metadata",
 ]);
 
 export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: string }, workerNames: Set<string>) => {
@@ -54,7 +55,8 @@ export const isSupportedSlotBinding = (binding: { [key: string]: unknown; type: 
   if (binding.type === "ratelimit") return typeof binding.namespace_id === "string";
   // Shared by every slot, as they are by every generation: Hyperdrive reaches an outside database,
   // Browser Rendering a local browser whose sessions each reset closes, sent email and Analytics
-  // Engine writes keep no state a Worker can read back, and static assets are only read.
+  // Engine writes keep no state a Worker can read back, and static assets and version metadata are
+  // only read.
   return SHARED_SLOT_BINDINGS.has(binding.type);
 };
 
