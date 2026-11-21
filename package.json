@@ -18,6 +18,10 @@
     "./setup": {
       "types": "./src/setup.ts",
       "default": "./src/setup.ts"
+    },
+    "./workerd": {
+      "types": "./src/WorkerdRun.ts",
+      "default": "./src/WorkerdRun.ts"
     }
   },
   "files": [

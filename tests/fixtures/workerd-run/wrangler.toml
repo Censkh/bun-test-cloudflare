@@ -1,0 +1,37 @@
+name = "workerd-run"
+main = "worker.ts"
+compatibility_date = "2026-09-09"
+compatibility_flags = ["nodejs_compat"]
+
+[[worker_loaders]]
+binding = "LOADER"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "workerd-run"
+database_id = "workerd-run"
+
+[[kv_namespaces]]
+binding = "OBSERVED"
+id = "workerd-run-observed"
+
+[[durable_objects.bindings]]
+name = "SLOTS"
+class_name = "Slot"
+
+[[durable_objects.bindings]]
+name = "ALARMS"
+class_name = "Alarm"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Slot", "Alarm"]
+
+[[queues.producers]]
+binding = "QUEUE"
+queue = "workerd-run"
+
+[[queues.consumers]]
+queue = "workerd-run"
+max_batch_size = 10
+max_batch_timeout = 0
