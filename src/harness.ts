@@ -72,6 +72,7 @@ export type CloudflareHarnessConfig<TWorkers extends Record<string, CloudflareWo
   TestHarnessOptions,
   "workers"
 > & {
+  d1ResetMode?: "drop" | "truncate";
   events?: {
     beforeRun?: (workers: CloudflareWorkerMap<TWorkers>, server: TestHarness) => Promise<void> | void;
   };
@@ -779,6 +780,7 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   config: CloudflareHarnessConfig<TWorkers>,
 ): CloudflareHarness<TWorkers> => {
   const {
+    d1ResetMode,
     events,
     isolatedWorkerSlots: configuredIsolatedWorkerSlots,
     prewarmedWorkerdPoolSize = WARM_WORKERD_POOL_SIZE,
@@ -823,7 +825,9 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   }
 
   const fencedSlots =
-    isolatedWorkerSlots > 1 ? createFencedWorkerSlots(preparedWorkers, isolatedWorkerSlots) : undefined;
+    isolatedWorkerSlots > 1
+      ? createFencedWorkerSlots(preparedWorkers, isolatedWorkerSlots, { d1ResetMode })
+      : undefined;
 
   const testHarnessOptions = {
     ...serverConfig,

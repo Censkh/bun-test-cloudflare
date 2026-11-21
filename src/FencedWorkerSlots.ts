@@ -566,7 +566,9 @@ export default class BtcfDynamicEntry extends WorkerEntrypoint {
 export const createFencedWorkerSlots = (
   workers: Array<{ input: WorkerInput; name: string }>,
   slotCount: number,
+  options: { d1ResetMode?: "drop" | "truncate" } = {},
 ): FencedWorkerSlots => {
+  const d1ResetMode = options.d1ResetMode ?? "drop";
   const secret = crypto.randomUUID();
   const cleanupDir = mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-fenced-"));
   process.once("exit", () => {
@@ -743,8 +745,12 @@ export const createFencedWorkerSlots = (
       else if (mod.kind === "cjs") moduleEntries.push(`${JSON.stringify(mod.relPath)}: { cjs: ${varName} }`);
       else moduleEntries.push(`${JSON.stringify(mod.relPath)}: ${varName}`);
     }
+    const statelessWasm =
+      Object.keys(spec.bindings).length === 0 &&
+      Object.keys(spec.vars).length === 0 &&
+      info.modules.some((mod) => mod.kind === "wasm");
     workerBuilderLines.push(
-      `  ${JSON.stringify(info.name)}: { spec: ${JSON.stringify(spec)}, modules: { ${moduleEntries.join(", ")} } }`,
+      `  ${JSON.stringify(info.name)}: { spec: ${JSON.stringify(spec)}, statelessWasm: ${JSON.stringify(statelessWasm)}, modules: { ${moduleEntries.join(", ")} } }`,
     );
   }
 
@@ -787,6 +793,7 @@ import {
 export { RunBindingCapability };
 
 const SECRET = ${JSON.stringify(secret)};
+const D1_RESET_MODE = ${JSON.stringify(d1ResetMode)};
 const D1_BINDINGS = ${JSON.stringify(d1Bindings)};
 const KV_BINDINGS = ${JSON.stringify(kvBindings)};
 const R2_BINDINGS = ${JSON.stringify(r2Bindings)};
@@ -817,7 +824,8 @@ const loadDynamicWorker = async (env, ctx, runId, workerName) => {
       loaderEnv[desc.sup] = env[desc.sup];
     }
   }
-  return loadRunWorker(env.LOADER, runId, workerName, () => ({
+  const reuseStatelessWasm = entry.statelessWasm && (!runtimeVars || Object.keys(runtimeVars).length === 0);
+  return loadRunWorker(env.LOADER, reuseStatelessWasm ? "stateless-wasm" : runId, workerName, () => ({
     compatibilityDate: entry.spec.compatibilityDate,
     compatibilityFlags: entry.spec.compatibilityFlags,
     mainModule: "__btcf_entry.js",
@@ -879,7 +887,7 @@ export class SlotBindingProxy extends RunBindingProxy {
     if (!retiredRunId) return;
     const doMap = Object.fromEntries(DO_BINDINGS.map((name) => [name, this.env[name]]));
     await Promise.all([
-      ...D1_BINDINGS.map((name) => clearD1Database(this.env[name])),
+      ...D1_BINDINGS.map((name) => clearD1Database(this.env[name], D1_RESET_MODE)),
       ...KV_BINDINGS.map((name) => clearKVNamespace(this.env[name])),
       ...R2_BINDINGS.map((name) => clearR2Bucket(this.env[name])),
       clearRunCaches(caches, retiredRunId, this.#cachedUrls),

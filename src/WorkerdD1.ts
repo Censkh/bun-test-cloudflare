@@ -63,8 +63,31 @@ export function executeRunD1Operation(database: RunD1Binding, operation: RunD1Op
 
 const quoteSqliteIdentifier = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
-/** Drops all user tables, views, and triggers from a D1 database between fenced runs. */
-export async function clearD1Database(database: RunD1Binding): Promise<void> {
+export type D1ResetMode = "drop" | "truncate";
+
+/** Clears a D1 database between fenced runs, either by dropping all objects or truncating all tables. */
+export async function clearD1Database(database: RunD1Binding, mode: D1ResetMode = "drop"): Promise<void> {
+  if (mode === "truncate") {
+    const { results } = await database
+      .prepare(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%' AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence')",
+      )
+      .all<{ name: string; sql: string | null }>();
+    if (results.length === 0) return;
+
+    const virtualPrefixes = results
+      .filter((row) => typeof row.sql === "string" && /^CREATE VIRTUAL TABLE\b/i.test(row.sql.trim()))
+      .map((row) => `${row.name}_`);
+    const tables = results.filter((row) => !virtualPrefixes.some((prefix) => row.name.startsWith(prefix)));
+    if (tables.length === 0) return;
+
+    await database.batch([
+      database.prepare("PRAGMA defer_foreign_keys = ON"),
+      ...tables.map((row) => database.prepare(`DELETE FROM ${quoteSqliteIdentifier(row.name)}`)),
+    ]);
+    return;
+  }
+
   const { results } = await database
     .prepare(
       "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND type IN ('trigger', 'view', 'table')",

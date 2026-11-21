@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { getCloudflareHarnessRunContext } from "bun-test-cloudflare";
-import { harness } from "./harness";
+import { harness, truncateHarness } from "./harness";
 
 const storageKey = "prewarmed-storage-reset";
 const hostCacheKey = new Request("https://prewarmed-storage-reset.invalid/host-cache");
@@ -76,5 +76,38 @@ test("a finished run's dispatch handles cannot mutate the next run", async () =>
       cached: null,
       requestCount: 1,
     });
+  });
+});
+
+test("d1ResetMode truncate preserves tables while clearing rows, foreign-key children, and autoincrement sequences", async () => {
+  await truncateHarness.run(async (workers) => {
+    const { DB } = await workers.WORKER.getEnv();
+    await DB.batch([
+      DB.prepare("CREATE TABLE parents (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)"),
+      DB.prepare("CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parents(id))"),
+    ]);
+    await DB.prepare("INSERT INTO parents (name) VALUES (?)").bind("first").run();
+    await DB.prepare("INSERT INTO children (id, parent_id) VALUES (?, ?)").bind(10, 1).run();
+  });
+
+  // Rotate through slot 1 so the next run reuses slot 0 after background truncate.
+  await truncateHarness.run(async () => {});
+
+  await truncateHarness.run(async (workers) => {
+    const { DB } = await workers.WORKER.getEnv();
+    const tables = await DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('parents', 'children') ORDER BY name",
+    ).all<{ name: string }>();
+    expect(tables.results.map((r) => r.name)).toEqual(["children", "parents"]);
+
+    const parentCount = await DB.prepare("SELECT COUNT(*) AS count FROM parents").first<{ count: number }>();
+    const childCount = await DB.prepare("SELECT COUNT(*) AS count FROM children").first<{ count: number }>();
+    expect(parentCount?.count).toBe(0);
+    expect(childCount?.count).toBe(0);
+
+    const inserted = await DB.prepare("INSERT INTO parents (name) VALUES (?) RETURNING id")
+      .bind("second")
+      .first<{ id: number }>();
+    expect(inserted?.id).toBe(1);
   });
 });

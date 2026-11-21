@@ -18,3 +18,16 @@ export const harness = createCloudflareHarness({
     },
   },
 });
+
+export const truncateHarness = createCloudflareHarness({
+  d1ResetMode: "truncate",
+  isolatedWorkerSlots: 2,
+  prewarmedWorkerdPoolSize: 1,
+  workers: {
+    WORKER: {
+      bindings: typeToken<StorageEnv>(),
+      configPath: path.join(import.meta.dir, "wrangler.toml"),
+      name: "prewarmed-storage-reset",
+    },
+  },
+});
