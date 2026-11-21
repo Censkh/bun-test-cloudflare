@@ -340,11 +340,19 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
             invokeSupervisorBridge(supervisor, secret, runId, fence, `queue:${desc.sup}`, op),
           );
           break;
-        case "do":
-          env[bindingName] = createRunDurableObjectNamespace((op: RunDurableObjectOperation) =>
-            invokeSupervisorBridge(supervisor, secret, runId, fence, `do:${desc.sup}`, op),
-          );
+        case "do": {
+          const queues = new Map<string, Promise<unknown>>();
+          env[bindingName] = createRunDurableObjectNamespace((op: RunDurableObjectOperation) => {
+            const key = JSON.stringify(op.target);
+            const prev = queues.get(key) ?? Promise.resolve();
+            const next = prev
+              .catch(() => {})
+              .then(() => invokeSupervisorBridge(supervisor, secret, runId, fence, `do:${desc.sup}`, op));
+            queues.set(key, next);
+            return next;
+          });
           break;
+        }
         case "ratelimit":
           env[bindingName] = createRunRateLimitBinding((op: RunRateLimitOperation) =>
             invokeSupervisorBridge(supervisor, secret, runId, fence, `ratelimit:${desc.sup}`, op),

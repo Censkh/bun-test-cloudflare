@@ -263,7 +263,6 @@ export class ${className} extends DurableObject {
   async __btcf_rpc(prop, args) {
     const runId = this.#getRunId();
     const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
-    if (!(await proxy.isActive(runId))) throw new Error(runEnded);
     return this.#withCaches(runId, proxy, async () => {
       const instance = this.#getInstance();
       return await instance[prop](...args);
@@ -759,6 +758,8 @@ const loadDynamicWorker = async (env, ctx, runId, workerName) => {
   const runtimeVars = await proxy.getRuntimeVars(workerName);
   const capability = ctx.exports.RunBindingCapability({ props: { runId, proxy } });
   const loaderEnv = {
+    ...entry.spec.vars,
+    ...(runtimeVars ?? {}),
     __BTCF_CAPABILITY: capability,
     ...(runtimeVars ? { __BTCF_RUNTIME_VARS: runtimeVars } : {}),
   };
@@ -1275,6 +1276,7 @@ export default {
       );
       flags.add("nodejs_compat");
 
+      const workerSpec = workerSpecs[workers.indexOf(worker)]!;
       const doHostConfig: Record<string, any> = {
         name: doHostName,
         main: hostInfo.wrapperPath,
@@ -1283,6 +1285,7 @@ export default {
         find_additional_modules: true,
         compatibility_date: origConfig.compatibility_date ?? maxCompatibilityDate,
         compatibility_flags: Array.from(flags),
+        ...(Object.keys(workerSpec.vars).length > 0 ? { vars: workerSpec.vars } : {}),
         rules: [
           {
             type: "ESModule",
