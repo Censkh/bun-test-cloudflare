@@ -1,5 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
+export { createRunD1Binding, executeRunD1Operation, type RunD1Binding, type RunD1Operation } from "./WorkerdD1";
+
 export type RunOperation = { name: string; args: unknown[] };
 export const runEnded = "BUN_TEST_CLOUDFLARE_RUN_ENDED";
 

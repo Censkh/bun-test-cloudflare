@@ -61,3 +61,30 @@ test("reuses two binding slots with fresh modules and rejects retired background
     ]);
   });
 });
+
+test("fenced D1 executes prepared statements and rolls back a failing batch like native D1", async () => {
+  await harness.run(async ({ HOST }) => {
+    const { DB } = await HOST.getEnv();
+    await DB.exec("CREATE TABLE effects (slot TEXT, run TEXT, source TEXT)");
+    expect((await HOST.fetch("https://example.test/activate/a/d1")).status).toBe(204);
+    const [reference, proxied] = await Promise.all([
+      HOST.fetch("https://example.test/native-d1"),
+      HOST.fetch("https://example.test/d1/a/d1"),
+    ]);
+    expect(reference.status).toBe(200);
+    if (!proxied.ok) throw new Error(await proxied.text());
+    const expected = await reference.json();
+    expect(expected).toMatchObject({
+      changes: 1,
+      rolledBack: true,
+      column: "63",
+      missing: null,
+      raw: [
+        ["id", "bytes"],
+        [1, "00FF"],
+        [2, "63"],
+      ],
+    });
+    expect(await proxied.json()).toEqual(expected);
+  });
+});

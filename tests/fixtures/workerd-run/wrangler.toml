@@ -11,6 +11,11 @@ binding = "DB"
 database_name = "workerd-run"
 database_id = "workerd-run"
 
+[[d1_databases]]
+binding = "REFERENCE"
+database_name = "native-d1-reference"
+database_id = "native-d1-reference"
+
 [[kv_namespaces]]
 binding = "OBSERVED"
 id = "workerd-run-observed"

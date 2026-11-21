@@ -1,10 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+  createRunD1Binding,
   dispatchRunQueue,
+  executeRunD1Operation,
   getRunAlarmOwner,
   loadRunWorker,
   RunBindingCapability,
   RunBindingProxy,
+  type RunD1Binding,
+  type RunD1Operation,
   type RunOperation,
   type RunQueueBody,
   runEnded,
@@ -15,6 +19,7 @@ import {
 
 type Env = {
   DB: D1Database;
+  REFERENCE: D1Database;
   LOADER: WorkerLoader;
   OBSERVED: KVNamespace;
   SLOTS: DurableObjectNamespace<Slot>;
@@ -37,6 +42,7 @@ export class Slot extends RunBindingProxy<Env> {
       }
       name = "effect";
     }
+    if (name === "d1") return executeRunD1Operation(this.env.DB, args[0] as RunD1Operation);
     const slot = this.ctx.id.name!;
     if (name === "effect") {
       await this.env.DB.prepare("INSERT INTO effects VALUES (?, ?, ?)").bind(slot, runId, args[0]).run();
@@ -71,10 +77,18 @@ export class Alarm extends DurableObject<Env> {
   }
 }
 
+// Wrangler's keepNames transform inserts this helper into both functions below.
 const child = `
+const __name = (value, name) => Object.defineProperty(value, "name", { value: name, configurable: true });
+${createRunD1Binding.toString()}
+${exerciseD1.toString()}
 let requests = 0;
 export default {
   async fetch(request, env, ctx) {
+    if (new URL(request.url).pathname.startsWith("/d1/")) {
+      const database = createRunD1Binding((operation) => env.BINDINGS.invoke("d1", operation));
+      return Response.json(await exerciseD1(database));
+    }
     const { delay } = await request.json();
     if (delay !== null) {
       await env.BINDINGS.invoke("queue", delay ? 2 : 0);
@@ -86,9 +100,35 @@ export default {
 };
 `;
 
+async function exerciseD1(database: RunD1Binding) {
+  await database.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, value BLOB)");
+  const insert = database.prepare("INSERT INTO items VALUES (?, ?)");
+  const select = database.prepare("SELECT id, hex(value) AS bytes FROM items WHERE id >= ? ORDER BY id");
+  const firstWrite = await insert.bind(1, Uint8Array.of(0, 255).buffer).run();
+  const batch = await database.batch([insert.bind(2, Uint8Array.of(99).buffer), select.bind(1)]);
+  let rolledBack: boolean;
+  try {
+    await database.batch([insert.bind(3, Uint8Array.of(1).buffer), insert.bind(2, Uint8Array.of(2).buffer)]);
+    rolledBack = false;
+  } catch {
+    rolledBack = true;
+  }
+  return {
+    changes: firstWrite.meta.changes,
+    batch: batch.map(({ success, results, meta }) => ({ success, results, changes: meta.changes })),
+    rolledBack,
+    row: await select.bind(1).first(),
+    column: await select.bind(2).first("bytes"),
+    missing: await select.bind(5).first("bytes"),
+    raw: await select.bind(1).raw({ columnNames: true }),
+    all: (await select.bind(1).all()).results,
+  };
+}
+
 export default {
   async fetch(request, env, ctx) {
     const [, action, slot, runId] = new URL(request.url).pathname.split("/");
+    if (action === "native-d1") return Response.json(await exerciseD1(env.REFERENCE));
     const proxy = env.SLOTS.getByName(slot);
     if (action === "activate") {
       await proxy.activate(runId);
