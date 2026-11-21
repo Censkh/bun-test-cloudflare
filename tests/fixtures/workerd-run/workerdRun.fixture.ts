@@ -88,3 +88,25 @@ test("fenced D1 executes prepared statements and rolls back a failing batch like
     expect(await proxied.json()).toEqual(expected);
   });
 });
+
+test("fenced R2 preserves bytes, range requests, preconditions, listings and metadata", async () => {
+  await harness.run(async ({ HOST }) => {
+    const { DB } = await HOST.getEnv();
+    await DB.exec("CREATE TABLE effects (slot TEXT, run TEXT, source TEXT)");
+    expect((await HOST.fetch("https://example.test/activate/a/r2")).status).toBe(204);
+    const native = await HOST.fetch("https://example.test/native-r2");
+    const proxied = await HOST.fetch("https://example.test/r2/a/r2");
+    if (!native.ok) throw new Error(await native.text());
+    if (!proxied.ok) throw new Error(await proxied.text());
+    const expected = await native.json();
+    expect(expected).toMatchObject({
+      size: 4,
+      body: [42, 127],
+      consumed: true,
+      preconditionHasBody: false,
+      listed: ["folder/asset"],
+      deleted: null,
+    });
+    expect(await proxied.json()).toEqual(expected);
+  });
+});

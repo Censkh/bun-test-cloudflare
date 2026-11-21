@@ -1,8 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   createRunD1Binding,
+  createRunR2Binding,
   dispatchRunQueue,
   executeRunD1Operation,
+  executeRunR2Operation,
   getRunAlarmOwner,
   loadRunWorker,
   RunBindingCapability,
@@ -11,6 +13,8 @@ import {
   type RunD1Operation,
   type RunOperation,
   type RunQueueBody,
+  type RunR2Binding,
+  type RunR2Operation,
   runEnded,
   runObjectName,
   runQueueMessage,
@@ -20,6 +24,8 @@ import {
 type Env = {
   DB: D1Database;
   REFERENCE: D1Database;
+  BUCKET: R2Bucket;
+  NATIVE_BUCKET: R2Bucket;
   LOADER: WorkerLoader;
   OBSERVED: KVNamespace;
   SLOTS: DurableObjectNamespace<Slot>;
@@ -43,6 +49,7 @@ export class Slot extends RunBindingProxy<Env> {
       name = "effect";
     }
     if (name === "d1") return executeRunD1Operation(this.env.DB, args[0] as RunD1Operation);
+    if (name === "r2") return executeRunR2Operation(this.env.BUCKET, args[0] as RunR2Operation);
     const slot = this.ctx.id.name!;
     if (name === "effect") {
       await this.env.DB.prepare("INSERT INTO effects VALUES (?, ?, ?)").bind(slot, runId, args[0]).run();
@@ -82,12 +89,18 @@ const child = `
 const __name = (value, name) => Object.defineProperty(value, "name", { value: name, configurable: true });
 ${createRunD1Binding.toString()}
 ${exerciseD1.toString()}
+${createRunR2Binding.toString()}
+${exerciseR2.toString()}
 let requests = 0;
 export default {
   async fetch(request, env, ctx) {
     if (new URL(request.url).pathname.startsWith("/d1/")) {
       const database = createRunD1Binding((operation) => env.BINDINGS.invoke("d1", operation));
       return Response.json(await exerciseD1(database));
+    }
+    if (new URL(request.url).pathname.startsWith("/r2/")) {
+      const bucket = createRunR2Binding((operation) => env.BINDINGS.invoke("r2", operation));
+      return Response.json(await exerciseR2(bucket));
     }
     const { delay } = await request.json();
     if (delay !== null) {
@@ -125,10 +138,39 @@ async function exerciseD1(database: RunD1Binding) {
   };
 }
 
+async function exerciseR2(bucket: RunR2Binding) {
+  const payload = new Blob([Uint8Array.of(0, 42, 127, 255)]);
+  await bucket.put("folder/asset", payload, {
+    httpMetadata: new Headers({ "content-type": "application/octet-stream", "cache-control": "max-age=45" }),
+    customMetadata: { source: "fixture" },
+  });
+  const head = (await bucket.head("folder/asset"))!;
+  const headers = new Headers();
+  head.writeHttpMetadata(headers);
+  const ranged = (await bucket.get("folder/asset", { range: new Headers({ range: "bytes=1-2" }) }))!;
+  const denied = (await bucket.get("folder/asset", { onlyIf: new Headers({ "if-match": '"different"' }) }))!;
+  const listed = await bucket.list({ prefix: "folder/" });
+  await bucket.delete("folder/asset");
+  return {
+    size: head.size,
+    etag: head.httpEtag,
+    headers: [...headers],
+    custom: head.customMetadata,
+    checksums: head.checksums.toJSON(),
+    range: ranged.range,
+    body: [...new Uint8Array(await ranged.arrayBuffer())],
+    consumed: ranged.bodyUsed,
+    preconditionHasBody: "body" in denied,
+    listed: listed.objects.map(({ key }) => key),
+    deleted: await bucket.head("folder/asset"),
+  };
+}
+
 export default {
   async fetch(request, env, ctx) {
     const [, action, slot, runId] = new URL(request.url).pathname.split("/");
     if (action === "native-d1") return Response.json(await exerciseD1(env.REFERENCE));
+    if (action === "native-r2") return Response.json(await exerciseR2(env.NATIVE_BUCKET));
     const proxy = env.SLOTS.getByName(slot);
     if (action === "activate") {
       await proxy.activate(runId);

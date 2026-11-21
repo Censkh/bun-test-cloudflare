@@ -16,6 +16,14 @@ binding = "REFERENCE"
 database_name = "native-d1-reference"
 database_id = "native-d1-reference"
 
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "workerd-run-r2"
+
+[[r2_buckets]]
+binding = "NATIVE_BUCKET"
+bucket_name = "native-r2-reference"
+
 [[kv_namespaces]]
 binding = "OBSERVED"
 id = "workerd-run-observed"
