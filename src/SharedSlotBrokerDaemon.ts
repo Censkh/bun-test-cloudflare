@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { TestHarnessOptions } from "wrangler";
 import { shouldInstallCompatibilityPatch, shouldInstallCompatibilityPatchGroup } from "./CompatibilityPatches";
+import type { FencedRunSettings } from "./FencedEnvBridge";
 import { installBrowserRenderingPatch } from "./patches/BrowserRenderingPatch";
 import { installChildProcessExtraFdPatch } from "./patches/ChildProcessExtraFdPatch";
 import { installMiniflareLoopbackPatch } from "./patches/MiniflareLoopbackPatch";
@@ -423,6 +424,7 @@ const runDaemon = async () => {
         const body = (await readJsonBody(req)) as {
           clientPid?: number;
           runtimeVarsByWorker?: Record<string, Record<string, unknown>>;
+          settings?: FencedRunSettings;
         };
         const slot = await acquireSlot();
         const { index } = slot;
@@ -435,6 +437,7 @@ const runDaemon = async () => {
             fencedSlots.secret,
             runId,
             body.runtimeVarsByWorker,
+            body.settings,
           );
         } catch (error) {
           await releaseSlot(slot);

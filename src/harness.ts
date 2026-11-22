@@ -954,16 +954,8 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
 
   const usesSlots = fencedSlots !== undefined || sharedBrokerConfigKey !== undefined;
   /** The harness's lease, given the variant's vars and settings before any of its code runs. */
-  const acquire = async (variant: CloudflareHarnessVariant<TWorkers> | undefined) => {
-    const lease = await getOrchestrator().acquire();
-    try {
-      await lease.run.configure(variant && toRunVariant(variant, workerEntries, preparedWorkers));
-    } catch (error) {
-      await lease.release();
-      throw error;
-    }
-    return lease;
-  };
+  const acquire = (variant: CloudflareHarnessVariant<TWorkers> | undefined) =>
+    getOrchestrator().acquire(variant && toRunVariant(variant, workerEntries, preparedWorkers));
   const createHandle = (variant: CloudflareHarnessVariant<TWorkers> | undefined): CloudflareHarness<TWorkers> => {
     const handle: CloudflareHarness<TWorkers> = {
       with(next) {

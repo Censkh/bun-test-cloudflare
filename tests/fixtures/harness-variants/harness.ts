@@ -6,7 +6,7 @@ export const harness = createCloudflareHarness({
   prewarmedWorkerdPoolSize: 1,
   workers: {
     WORKER: {
-      bindings: typeToken<{ KV: KVNamespace }>(),
+      bindings: typeToken<{ GREETING: string; KV: KVNamespace }>(),
       configPath: path.join(import.meta.dir, "wrangler.toml"),
       name: "harness-variants",
     },

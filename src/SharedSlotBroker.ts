@@ -6,12 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import type { TestHarness, TestHarnessOptions, WorkerHandle } from "wrangler";
 import { runWithCloudflareCaches } from "./CacheBridge";
-import {
-  configureFencedRun,
-  createFencedBunCacheStorage,
-  createFencedWorkerHandle,
-  type FencedWorkerSpec,
-} from "./FencedEnvBridge";
+import { createFencedBunCacheStorage, createFencedWorkerHandle, type FencedWorkerSpec } from "./FencedEnvBridge";
 import { type CloudflareHarnessRunContext, type PreparedWorkerInput, runInHarnessContext } from "./HarnessRun";
 import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerMap } from "./harness";
 import { readOwnCommandLine } from "./PrewarmedServerOrchestrator";
@@ -450,7 +445,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
     await this.#disposeProxyClient();
   }
 
-  async #lease(liveVars: Record<string, Record<string, unknown>>) {
+  async #lease(liveVars: Record<string, Record<string, unknown>>, settings?: RunVariant["settings"]) {
     const { endpoint } = await this.#ensureConnected();
     const response = await brokerFetch(`${endpoint.url}/__btcf_broker/lease`, {
       method: "POST",
@@ -461,6 +456,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
       body: JSON.stringify({
         clientPid: process.pid,
         runtimeVarsByWorker: liveVars,
+        settings,
       }),
     });
     if (!response.ok) {
@@ -470,20 +466,25 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
     return { endpoint, lease, proxyClient: await this.#proxyClientFor(lease.proxyUrl, lease.upgradeUrl) };
   }
 
-  async acquire(): Promise<HarnessRunLease<TWorkers>> {
+  async acquire(variant?: RunVariant): Promise<HarnessRunLease<TWorkers>> {
     const liveVars = this.#readLiveWorkerVars();
+    for (const [name, overrides] of Object.entries(variant?.vars ?? {})) {
+      liveVars[name] = { ...liveVars[name], ...overrides };
+    }
     // A broker whose runtime crashed, or that its parent's exit stopped, is gone for every test
     // process: one that can't be reached is replaced once, as a process's own runtime would be.
-    const { endpoint, lease, proxyClient } = await this.#lease(liveVars).catch(async (error: unknown) => {
-      const code = (error as NodeJS.ErrnoException | null)?.code;
-      const unreachable =
-        code === "ConnectionRefused" ||
-        error instanceof TypeError ||
-        /ECONNREFUSED|ECONNRESET|socket/i.test(String(error));
-      if (this.#closed || !unreachable) throw error;
-      await this.#disconnect();
-      return this.#lease(liveVars);
-    });
+    const { endpoint, lease, proxyClient } = await this.#lease(liveVars, variant?.settings).catch(
+      async (error: unknown) => {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        const unreachable =
+          code === "ConnectionRefused" ||
+          error instanceof TypeError ||
+          /ECONNREFUSED|ECONNRESET|socket/i.test(String(error));
+        if (this.#closed || !unreachable) throw error;
+        await this.#disconnect();
+        return this.#lease(liveVars, variant?.settings);
+      },
+    );
 
     const serviceFetcher = proxyClient.env[lease.serviceKey] as Fetcher;
     const remoteSupervisor = {
@@ -497,24 +498,22 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
 
     const fence = new RunFence();
     const workerSpecs = endpoint.workerSpecs as FencedWorkerSpec[];
-    const createWorkers = (vars: Record<string, Record<string, unknown>>) =>
-      Object.fromEntries(
-        this.options.workerEntries.map(([key], workerIndex) => {
-          const spec = workerSpecs[workerIndex]!;
-          return [
-            key,
-            createFencedWorkerHandle({
-              fence,
-              runId: lease.runId,
-              runtimeVars: vars[spec.name],
-              secret: endpoint.fencedSecret,
-              spec,
-              supervisor: remoteSupervisor,
-            }),
-          ];
-        }),
-      ) as unknown as CloudflareWorkerMap<TWorkers>;
-    let workers = createWorkers(liveVars);
+    const workers = Object.fromEntries(
+      this.options.workerEntries.map(([key], workerIndex) => {
+        const spec = workerSpecs[workerIndex]!;
+        return [
+          key,
+          createFencedWorkerHandle({
+            fence,
+            runId: lease.runId,
+            runtimeVars: liveVars[spec.name],
+            secret: endpoint.fencedSecret,
+            spec,
+            supervisor: remoteSupervisor,
+          }),
+        ];
+      }),
+    ) as unknown as CloudflareWorkerMap<TWorkers>;
 
     const cacheStorage = createFencedBunCacheStorage(remoteSupervisor, endpoint.fencedSecret, lease.runId, fence);
 
@@ -611,15 +610,6 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
     };
 
     const run = {
-      // The variant's vars and settings, sent to the slot this lease activated.
-      configure: async (variant: RunVariant | undefined) => {
-        if (!variant) return;
-        const vars = { ...liveVars };
-        for (const [name, overrides] of Object.entries(variant.vars)) vars[name] = { ...vars[name], ...overrides };
-        await configureFencedRun(remoteSupervisor, endpoint.fencedSecret, lease.runId, vars, variant.settings);
-        workers = createWorkers(vars);
-        context.workers = workers;
-      },
       execute: async <TResult>(
         callback: (w: CloudflareWorkerMap<TWorkers>, s: TestHarness) => Promise<TResult> | TResult,
       ) =>

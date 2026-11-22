@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import type { HarnessRun } from "./HarnessRun";
 import { stopWranglerEsbuildService } from "./patches/WranglerGuessWorkerFormatPatch";
-import type { HarnessRunLease, ServerOrchestrator } from "./ServerOrchestrator";
+import {
+  configureLocalLease,
+  type HarnessRunLease,
+  type RunVariant,
+  type ServerOrchestrator,
+} from "./ServerOrchestrator";
 
 export const WARM_WORKERD_POOL_SIZE = 1;
 const DEFAULT_WARM_WORKERD_START_TIMEOUT_MS = 30_000;
@@ -204,7 +209,7 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
     this.#fillWarmPool();
   }
 
-  async acquire(): Promise<HarnessRunLease<TWorkers>> {
+  async acquire(variant?: RunVariant): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
     // Each prewarmed run holds whole workerd processes, so a harness that isn't being used doesn't
     // keep its pool warm while another one runs: a suite's shared harness would otherwise hold
@@ -250,34 +255,32 @@ export class PrewarmedServerOrchestrator<TWorkers extends Record<string, any>> i
 
     this.#inUse.add(run);
 
-    return {
-      run,
-      release: async () => {
-        if (!this.#inUse.delete(run)) {
-          return;
-        }
-        if (run.runtimeCrash) {
-          // The run already failed with the crash; the pool replaces it with a new runtime.
-          await run.close().catch(() => {});
-          this.#fillWarmPool();
-          return;
-        }
-
-        try {
-          run.flushLogs();
-        } catch (error) {
-          await run.close().catch(() => {});
-          this.#fillWarmPool();
-          throw error;
-        }
-        if (!this.#closed && !this.#idle && this.#available.length + this.#inUse.size < this.poolSize) {
-          this.#available.push(this.#createResetRun(run));
-        } else {
-          await run.close();
-        }
+    const release = async () => {
+      if (!this.#inUse.delete(run)) {
+        return;
+      }
+      if (run.runtimeCrash) {
+        // The run already failed with the crash; the pool replaces it with a new runtime.
+        await run.close().catch(() => {});
         this.#fillWarmPool();
-      },
+        return;
+      }
+
+      try {
+        run.flushLogs();
+      } catch (error) {
+        await run.close().catch(() => {});
+        this.#fillWarmPool();
+        throw error;
+      }
+      if (!this.#closed && !this.#idle && this.#available.length + this.#inUse.size < this.poolSize) {
+        this.#available.push(this.#createResetRun(run));
+      } else {
+        await run.close();
+      }
+      this.#fillWarmPool();
     };
+    return configureLocalLease(run, release, variant);
   }
 
   async close() {
@@ -436,7 +439,7 @@ export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> im
     getPrewarmedServerOrchestratorRegistry().orchestrators.add(this);
   }
 
-  async acquire(): Promise<HarnessRunLease<TWorkers>> {
+  async acquire(variant?: RunVariant): Promise<HarnessRunLease<TWorkers>> {
     this.#assertOpen();
 
     const previousLease = this.#leaseTail;
@@ -462,14 +465,14 @@ export class ReusableServerOrchestrator<TWorkers extends Record<string, any>> im
       } else if (run) {
         await run.resetForReuse();
         await run.assertUsable();
-        return { run, release };
+        return configureLocalLease(run, release, variant);
       }
 
       const createdRun = this.createRun();
       this.#run = createdRun;
       await createdRun.start();
       await createdRun.assertUsable();
-      return { run: createdRun, release };
+      return configureLocalLease(createdRun, release, variant);
     } catch (error) {
       const run = this.#run;
       this.#run = undefined;
