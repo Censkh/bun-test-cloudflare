@@ -4,8 +4,6 @@ type Env = {
   SERVICE: Fetcher;
 };
 
-let requestCount = 0;
-
 export class SlotCounter extends DurableObject {
   async fetch() {
     const count = ((await this.ctx.storage.get<number>("count")) ?? 0) + 1;
@@ -16,10 +14,8 @@ export class SlotCounter extends DurableObject {
 
 export default {
   async fetch(_request: Request, env: Env) {
-    requestCount += 1;
-    const serviceResponse = (await (await env.SERVICE.fetch("https://service.invalid/")).json()) as {
-      requestCount: number;
-    };
-    return Response.json({ requestCount, serviceRequestCount: serviceResponse.requestCount });
+    // The slot's other Worker answers through its service binding.
+    const service = (await (await env.SERVICE.fetch("https://service.invalid/")).json()) as { answered: boolean };
+    return Response.json({ serviceAnswered: service.answered });
   },
 };

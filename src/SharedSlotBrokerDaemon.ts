@@ -380,6 +380,8 @@ const runDaemon = async () => {
       if (req.method === "GET" && urlPath === "/__btcf_broker/health") {
         sendJson(res, 200, {
           activeLeases: activeLeases.size,
+          // Who holds each lease, for finding a test process that holds its slot.
+          leases: [...activeLeases.values()].map(({ clientPid, slot }) => ({ clientPid, slot: slot.index })),
           freeSlots: runtime.freeSlots.length,
           ok: true,
           slotCount: config.slotCount,

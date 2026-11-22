@@ -13,9 +13,16 @@ export class Greeter extends DurableObject<Env> {
   }
 }
 
+// Worked out from the env once, as a client made on first use is.
+let cachedGreeting: string | undefined;
+
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
+    if (url.pathname === "/cached-greeting") {
+      cachedGreeting ??= env.GREETING;
+      return Response.json({ greeting: cachedGreeting });
+    }
     if (url.pathname === "/greeting") return Response.json({ greeting: env.GREETING });
     if (url.pathname === "/object-greeting")
       return Response.json({ greeting: await env.GREETER.getByName("a").greeting() });

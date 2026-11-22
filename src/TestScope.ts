@@ -11,6 +11,9 @@ export const markTestFinished = () => {
   runningTests = Math.max(0, runningTests - 1);
 };
 
+/** Whether a test (or its beforeEach) is running: not a beforeAll, afterAll or file collection. */
+export const isInTest = () => runningTests > 0;
+
 /**
  * How long a scope's teardown may take. Closing runtimes can outlast Bun's 5 s hook limit on a
  * loaded machine, as when a crashed runtime is being restarted, which failed a file whose tests

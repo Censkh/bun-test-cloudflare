@@ -1,0 +1,6 @@
+name = "service-rpc-target"
+main = "src/target.ts"
+compatibility_date = "2025-08-15"
+
+[vars]
+LABEL = "target"

@@ -24,6 +24,18 @@ test("a variant's vars reach its Worker and its Durable Objects (env and process
   await harness.run(async (workers) => expect(await greetings(workers)).toEqual(base));
 });
 
+test("a variant's runs don't share module state worked out from another set of vars", async () => {
+  const cached = async (workers: Parameters<Parameters<typeof harness.run>[0]>[0]) =>
+    ((await (await workers.WORKER.fetch("https://example.com/cached-greeting")).json()) as { greeting: string })
+      .greeting;
+  // Once in each of the harness's two slots, which runs take in turn.
+  for (let run = 0; run < 2; run++) await harness.run(async (workers) => expect(await cached(workers)).toBe("base"));
+  await harness
+    .with({ vars: { WORKER: { GREETING: "cached-variant" } } })
+    .run(async (workers) => expect(await cached(workers)).toBe("cached-variant"));
+  await harness.run(async (workers) => expect(await cached(workers)).toBe("base"));
+});
+
 test("a later variant's vars are over an earlier one's", async () => {
   await harness
     .with({ vars: { WORKER: { GREETING: "first" } } })

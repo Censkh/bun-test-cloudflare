@@ -20,6 +20,10 @@ import type { HarnessRunLease, RunVariant, ServerOrchestrator } from "./ServerOr
 import type { SharedBrokerDaemonConfig, SharedBrokerEndpointInfo } from "./SharedSlotBrokerDaemon";
 
 const BROKER_DIR = path.join(os.tmpdir(), "bun-test-cloudflare-brokers");
+
+// The broker's own requests use fetch as it was when the harness loaded: a test that spies on
+// globalThis.fetch counts or stubs its own requests, not these.
+const brokerFetch = globalThis.fetch.bind(globalThis);
 const DEFAULT_MAX_SHARED_SLOTS = 16;
 const DEFAULT_BROKER_START_TIMEOUT_MS = 45_000;
 
@@ -302,7 +306,13 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
 
   async #ensureConnected(): Promise<{ endpoint: SharedBrokerEndpointInfo }> {
     const connecting = !this.#endpointPromise;
-    this.#endpointPromise ??= this.#connectOrStartBroker();
+    // A start that failed (Bun kills what a test that timed out was starting) is tried again by
+    // the next lease rather than failing every one after it.
+    this.#endpointPromise ??= this.#connectOrStartBroker().catch((error: unknown) => {
+      this.#endpointPromise = undefined;
+      this.#releaseOwnStartLock();
+      throw error;
+    });
     const endpoint = await this.#endpointPromise;
     if (process.env.BUN_TEST_CLOUDFLARE_TIMINGS === "1" && connecting) {
       process.stderr.write(
@@ -329,6 +339,17 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
     const current = this.#proxyClient;
     this.#proxyClient = undefined;
     await current?.client.then((client) => client.dispose()).catch(() => {});
+  }
+
+  /**
+   * Gives back the start lock a failed start of this process's holds, which a broker that came up
+   * would have taken over: held on by a live process, it would keep every later start waiting.
+   */
+  #releaseOwnStartLock() {
+    const lockPath = path.join(BROKER_DIR, `${this.#brokerKey}.lock`);
+    try {
+      if (Number(readFileSync(lockPath, "utf8").trim()) === process.pid) rmSync(lockPath, { force: true });
+    } catch {}
   }
 
   async #connectOrStartBroker(): Promise<SharedBrokerEndpointInfo> {
@@ -421,7 +442,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
 
   async #lease(liveVars: Record<string, Record<string, unknown>>) {
     const { endpoint } = await this.#ensureConnected();
-    const response = await fetch(`${endpoint.url}/__btcf_broker/lease`, {
+    const response = await brokerFetch(`${endpoint.url}/__btcf_broker/lease`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -492,7 +513,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
       const clear = logsCleared;
       logsCleared = false;
       const generation = logsGeneration;
-      const response = await fetch(`${endpoint.url}/__btcf_broker/logs`, {
+      const response = await brokerFetch(`${endpoint.url}/__btcf_broker/logs`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-btcf-broker-token": endpoint.token },
         body: JSON.stringify({ after: clear ? 0 : logs.length, clear, leaseId: lease.leaseId }),
@@ -564,7 +585,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
       this.#activeLeases.delete(done.promise);
       done.resolve();
       await fence.retire();
-      await fetch(`${endpoint.url}/__btcf_broker/release`, {
+      await brokerFetch(`${endpoint.url}/__btcf_broker/release`, {
         method: "POST",
         headers: {
           "content-type": "application/json",

@@ -2,6 +2,15 @@ import { beforeAll, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
 
+/**
+ * A fixture's environment: this process's, uncoloured whatever it was given (the root test script
+ * sets FORCE_COLOR), so tests read the fixture's output as Bun prints it plainly.
+ */
+const fixtureEnv = (env: Record<string, string> | undefined) => {
+  const { FORCE_COLOR: _forceColor, ...inherited } = process.env;
+  return { ...inherited, NO_COLOR: "1", ...env };
+};
+
 export const fixturePath = (testDir: string, fixtureName: string) => path.join(testDir, "fixtures", fixtureName);
 
 const packageRoot = path.resolve(import.meta.dir, "..");
@@ -117,7 +126,7 @@ const prepareBunFixture = (fixtureRoot: string, options: BunFixtureBeforeOptions
         ? [process.execPath, "install", "--no-save"]
         : [process.execPath, "install", "--no-save", "--lockfile-only"],
       cwd: fixtureRoot,
-      env: { ...process.env, ...options.env },
+      env: fixtureEnv(options.env),
       stderr: "pipe",
       stdout: "pipe",
     });
@@ -229,7 +238,7 @@ const runBunFixture = (fixtureRoot: string, options: BunFixtureRunOptions = {}) 
   const result = Bun.spawnSync({
     cmd: command,
     cwd: fixtureRoot,
-    env: { ...process.env, ...options.env },
+    env: fixtureEnv(options.env),
     stderr: "pipe",
     stdout: "pipe",
     timeout: options.processTimeoutMs,

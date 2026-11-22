@@ -1,3 +1,4 @@
+import { onTestFinished } from "bun:test";
 import crypto from "node:crypto";
 import {
   closeSync,
@@ -44,7 +45,7 @@ import {
 import type { RunVariant } from "./ServerOrchestrator";
 import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrchestrator";
 import { SharedBrokerServerOrchestrator, shouldUseSharedSlotBroker } from "./SharedSlotBroker";
-import { onCreatingScopeEnd } from "./TestScope";
+import { isInTest, onCreatingScopeEnd } from "./TestScope";
 import { getWorkerBuildCacheDir, restoreCachedBuild, storeBuild } from "./WorkerBuildCache";
 import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
 import { installWranglerPatches } from "./wranglerPatches";
@@ -992,14 +993,42 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     },
     async run(callback) {
       const runStartedAt = performance.now();
+      // A run its test doesn't wait for (the test timed out) ends with the test: its slot goes back
+      // for the tests after it, and its own later calls fail as a finished run's. Held on, it would
+      // keep a slot the other test processes sharing a broker wait for. Registered before the run
+      // is acquired, which can outlast its test (a broker starting on a loaded machine), and only
+      // in a test: Bun runs one a beforeAll registers as that hook ends, and a run a hook or a
+      // script starts ends when its callback does.
+      let testEnded = false;
+      let release: (() => Promise<void>) | undefined;
+      if (isInTest()) {
+        try {
+          onTestFinished(() => {
+            testEnded = true;
+            // What its release reports (a waitUntil failure) is the run's to throw, if it still can.
+            return release?.().catch(() => {});
+          });
+        } catch {}
+      }
       const acquireStartedAt = performance.now();
       const lease = await acquire(variant);
       logTiming("harness acquire", acquireStartedAt);
+      let released: Promise<void> | undefined;
+      release = () => {
+        released ??= lease.release();
+        return released;
+      };
+      if (testEnded) {
+        await release().catch(() => {});
+        const error = new Error("Cloudflare harness run's test ended before the run started");
+        error.name = "CloudflareHarnessRunEnded";
+        throw error;
+      }
       try {
         return await lease.run.execute(callback, { closeAfterExecute: !keepsServerAlive });
       } finally {
         const releaseStartedAt = performance.now();
-        await lease.release();
+        await release();
         logTiming("harness release", releaseStartedAt);
         logTiming("harness run", runStartedAt);
       }

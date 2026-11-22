@@ -34,6 +34,24 @@ describe("shared slot broker", () => {
   );
 
   fixture.test(
+    "a run whose test times out gives its slot back as the test ends",
+    ({ run }) => {
+      const result = run({
+        // Its own broker of two slots for a single test process.
+        env: { BUN_TEST_CLOUDFLARE_SHARED_SLOTS: "2" },
+        fixtureTests: ["./sharedSlotTimeout.fixture.ts"],
+        timeoutMs: 30_000,
+      });
+      // The three tests that time out fail, one before its run starts; the run after them passes.
+      result.expectStatusCode(1);
+      const output = `${result.stdout}${result.stderr}`;
+      expect(output).toMatch(/^ 1 pass$/m);
+      expect(output).toMatch(/^ 3 fail$/m);
+    },
+    180_000,
+  );
+
+  fixture.test(
     "a broker that stops is replaced for the next run",
     ({ run }) => {
       const result = run({

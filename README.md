@@ -125,7 +125,7 @@ const harness = createCloudflareHarness({
 });
 ```
 
-Eligible harnesses use four isolated slots by default. Each slot has namespaced Cache API access and unique D1, KV, R2, queue and Durable Object storage, which is reset after every run. A slot's Worker isolates serve its runs one after another, so module-level state in a Worker's code (a cache in a global, say) lasts from one run to the next in that slot, as it does from one request to the next in production; each run still gets its own bindings, vars and `process.env`. Harnesses with unsupported bindings automatically use the single-slot reset path; explicitly requesting multiple slots with unsupported bindings throws.
+Eligible harnesses use four isolated slots by default. Each slot has namespaced Cache API access and unique D1, KV, R2, queue and Durable Object storage, which is reset after every run. A slot's Worker isolates serve its runs one after another, one isolate for each set of vars the runs give a Worker, so module-level state in a Worker's code (a cache in a global, say) lasts from one run to the next with the same vars in that slot, as it does from one request to the next in production; each run still gets its own bindings, vars and `process.env`. Harnesses with unsupported bindings automatically use the single-slot reset path; explicitly requesting multiple slots with unsupported bindings throws.
 
 `prewarmedWorkerdPoolSize` defaults to `1`, avoiding duplicate startup and memory costs. Set it to `2` or higher only when tests need concurrent harness leases; another ready pool member can then serve leases while a generation rebuilds.
 

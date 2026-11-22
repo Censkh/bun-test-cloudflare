@@ -524,8 +524,7 @@ const buildDoFencedEnv = (runId, proxy, rawEnv, runtimeVars) => {
     else if (desc.kind === "ratelimit") env[bindingName] = createRunRateLimitBinding((op) => invoke("ratelimit:" + desc.sup, op));
     else if (desc.kind === "workflow") env[bindingName] = createRunWorkflowBinding((op) => invoke("workflow:" + desc.sup, op));
     else if (desc.kind === "service") {
-      env[bindingName] = {
-        fetch: (input, init) => {
+      const fetch = (input, init) => {
           const req = input instanceof Request && init === undefined ? input : new Request(input, init);
           // The request crosses to the slot's supervisor by RPC, which can't carry its signal: it
           // goes without one, and the signal aborts the call here instead.
@@ -538,8 +537,17 @@ const buildDoFencedEnv = (runId, proxy, rawEnv, runtimeVars) => {
             signal.addEventListener("abort", abort, { once: true });
             sent.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
           });
-        },
       };
+      // Its entrypoint's RPC methods go to the slot's supervisor, which calls them as this run.
+      env[bindingName] = new Proxy(
+        { fetch },
+        {
+          get: (target, property) =>
+            property in target || typeof property === "symbol" || property === "then"
+              ? target[property]
+              : (...args) => invoke("servicecall:" + desc.target, { method: String(property), args }),
+        },
+      );
     } else if (desc.kind === "send_email") {
       env[bindingName] = { send: (msg) => invoke("email:" + desc.sup, msg) };
     } else if (desc.kind === "analytics_engine") {
@@ -635,6 +643,18 @@ if (typeof process !== "undefined" && process.env) {
   Object.defineProperty(process, "env", { configurable: true, value: view, writable: true });
 }
 
+// A service binding to another Worker of the slot: its fetch, and its entrypoint's RPC methods.
+const serviceBinding = (fetch, call) =>
+  new Proxy(
+    { fetch },
+    {
+      get: (target, property) =>
+        property in target || typeof property === "symbol" || property === "then"
+          ? target[property]
+          : (...args) => call(String(property), args),
+    },
+  );
+
 // A request for another Worker of the slot, as this run's.
 const asRun = (runId, input, init) => {
   const request = input instanceof Request && init === undefined ? input : new Request(input, init);
@@ -680,7 +700,10 @@ const buildEnv = (rawEnv, runId, vars) => {
     else if (desc.kind === "workflow") env[bindingName] = createRunWorkflowBinding((op) => invoke("workflow:" + desc.sup, op));
     else if (desc.kind === "service") {
       const service = rawEnv["__BTCF_SVC_" + bindingName];
-      env[bindingName] = { fetch: (input, init) => service.fetch(asRun(runId, input, init)) };
+      env[bindingName] = serviceBinding(
+        (input, init) => service.fetch(asRun(runId, input, init)),
+        (method, args) => service.__btcf_call(runId, method, args),
+      );
     } else if (desc.kind === "send_email") env[bindingName] = { send: (msg) => invoke("email:" + desc.sup, msg) };
     else if (desc.kind === "analytics_engine") {
       env[bindingName] = { writeDataPoint: (event) => { void invoke("ae:" + desc.sup, event).catch(() => {}); } };
@@ -749,6 +772,15 @@ export default class BtcfDynamicEntry extends WorkerEntrypoint {
         await worker.queue(batch, env, fenceCtx(this.ctx, env));
       }
       return { acked: [...acked], retried: [...retried.entries()] };
+    });
+  }
+
+  // An RPC method of the Worker's entrypoint, called by another Worker of the slot as this run.
+  async __btcf_call(method, args) {
+    return asRunCall(this.env, this.ctx, async (env, worker) => {
+      const target = typeof worker === "function" ? new worker(fenceCtx(this.ctx, env), env) : worker;
+      if (typeof target?.[method] !== "function") throw new TypeError(method + " is not a function");
+      return target[method](...args);
     });
   }
 
@@ -1086,14 +1118,24 @@ const readModules = async (store, workerName) => {
   return modules;
 };
 
-// A Worker's isolate in this slot, which serves the slot's runs one after another: its env holds
-// only what every run shares, and each call names its run (the entry's ctx.props). The loader keeps
-// each Worker it loads by name, so one per slot and Worker, rather than one per run, keeps the
-// runtime from growing with every run.
+// Names the vars a run gives a Worker: runs with the same ones share an isolate, so module state
+// worked out from them (a client made once from the env) holds for every run that isolate serves.
+const varsKey = (vars) => {
+  const text = JSON.stringify(Object.entries(vars ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+  return (hash >>> 0).toString(16) + ":" + text.length;
+};
+
+// A Worker's isolate in this slot, which serves the slot's runs with the same vars one after
+// another: its env holds only what those runs share, and each call names its run (the entry's
+// ctx.props). The loader keeps each Worker it loads by name, so one per slot, Worker and set of
+// vars, rather than one per run, keeps the runtime from growing with every run.
 const loadDynamicWorker = async (env, ctx, runId, workerName) => {
   const entry = WORKERS[workerName];
   if (!entry) throw new Error("Unknown fenced worker: " + workerName);
-  const worker = loadRunWorker(env.LOADER, "slot", workerName, async () => {
+  const vars = await env.SLOT_PROXY.getByName("slot").getRuntimeVars(workerName);
+  const worker = loadRunWorker(env.LOADER, "vars:" + varsKey(vars), workerName, async () => {
     const proxy = env.SLOT_PROXY.getByName("slot");
     const loaderEnv = {
       ...entry.spec.vars,
@@ -1131,6 +1173,14 @@ const takeRunHeader = (request) => {
 };
 
 export class RunServiceFetcher extends WorkerEntrypoint {
+  // An RPC method of the target Worker's entrypoint, as the calling run.
+  async __btcf_call(runId, method, args) {
+    const proxy = this.env.SLOT_PROXY.getByName("slot");
+    if (!(await proxy.isActive(runId))) throw new Error(runEnded);
+    const worker = await loadDynamicWorker(this.env, this.ctx, runId, this.ctx.props.targetWorker);
+    return worker.getEntrypoint().__btcf_call(method, args);
+  }
+
   async fetch(incoming) {
     const { targetWorker } = this.ctx.props;
     const { runId, request } = takeRunHeader(incoming);
@@ -1258,6 +1308,10 @@ export class SlotBindingProxy extends RunBindingProxy {
     if (kind === "service") {
       const worker = await loadDynamicWorker(this.env, this.ctx, runId, target);
       return worker.getEntrypoint().fetch(op);
+    }
+    if (kind === "servicecall") {
+      const worker = await loadDynamicWorker(this.env, this.ctx, runId, target);
+      return worker.getEntrypoint().__btcf_call(op.method, op.args);
     }
     throw new Error("Unknown fenced binding operation: " + name);
   }

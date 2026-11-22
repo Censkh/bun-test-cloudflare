@@ -9,7 +9,6 @@ import {
   executeRunR2Operation,
   getRunAlarmOwner,
   loadRunWorker,
-  RunBindingCapability,
   RunBindingProxy,
   type RunCacheOperation,
   type RunD1Binding,
@@ -36,7 +35,13 @@ type Env = {
   QUEUE: Queue<RunQueueBody<{ slot: string }>>;
 };
 
-export { RunBindingCapability };
+// The fixture's Workers are loaded per run, so their capability holds its run, as a slot's
+// supervisor gives RunBindingCapability each call's.
+export class FixtureCapability extends WorkerEntrypoint<unknown, { runId: string; proxy: DurableObjectStub<Slot> }> {
+  invoke(name: string, ...args: unknown[]) {
+    return this.ctx.props.proxy.invoke(this.ctx.props.runId, { name, args });
+  }
+}
 
 export class Observer extends WorkerEntrypoint<Env> {
   record(key: string, value: string) {
@@ -256,7 +261,7 @@ export default {
       return new Response(null, { status: 204 });
     }
     if (!(await proxy.isActive(runId))) return new Response(null, { status: 410 });
-    const capability = ctx.exports.RunBindingCapability({ props: { runId, proxy } });
+    const capability = ctx.exports.FixtureCapability({ props: { runId, proxy } });
     if (action === "hold-write") {
       await capability.invoke("held-effect", "held");
       return new Response(null, { status: 204 });

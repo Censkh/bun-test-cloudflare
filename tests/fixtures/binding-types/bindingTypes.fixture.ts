@@ -159,8 +159,7 @@ test("rotates every slot-eligible binding through a complete prewarmed generatio
       const counter = env.COUNTER.get(env.COUNTER.idFromName("fixture"));
       expect(await (await counter.fetch("https://counter.invalid/")).json()).toEqual({ count: 1 });
       expect(await (await workers.SLOTTED.fetch("https://slotted.invalid/state")).json()).toEqual({
-        requestCount: 1,
-        serviceRequestCount: 1,
+        serviceAnswered: true,
       });
 
       await env.DB.prepare("CREATE TABLE entries (value TEXT NOT NULL)").run();
