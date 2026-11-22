@@ -186,6 +186,8 @@ const runDaemon = async () => {
     storageRoot: string;
     proxyClient: { env: Record<string, any> };
     proxyServer: http.Server;
+    upgradeServer: net.Server;
+    upgradeUrl: string;
     proxyUrl: string;
     slotProxyBindings: Record<string, Record<string, string>>;
     slotServiceKeys: Record<string, string>;
@@ -217,38 +219,68 @@ const runDaemon = async () => {
       });
       req.pipe(upstream);
     });
-    // Forward WebSocket upgrades (e.g. response.webSocket via Miniflare ProxyClient).
-    proxyServer.on("upgrade", (req, socket, head) => {
-      const upstream = net.connect(Number(runtimeEntryURL.port), runtimeEntryURL.hostname, () => {
-        const lines = [`${req.method ?? "GET"} ${req.url ?? "/"} HTTP/1.1`];
-        const rawHeaders = req.rawHeaders;
-        for (let i = 0; i < rawHeaders.length; i += 2) {
-          const name = rawHeaders[i]!;
-          const lower = name.toLowerCase();
-          let value = rawHeaders[i + 1]!;
-          if (lower === "host") value = runtimeEntryURL.host;
-          else if (lower === opSecretHeaderLower) value = brokerProxySecret;
-          lines.push(`${name}: ${value}`);
+    // Bun 1.3's node:http upgrade socket cannot pipe a raw handshake back to the client.
+    // Accept upgrades on a TCP listener so the runtime handles the handshake and frames itself.
+    const upgradeServer = net.createServer((socket) => {
+      let pending = Buffer.alloc(0);
+      socket.setTimeout(10_000, () => socket.destroy());
+      socket.on("error", () => socket.destroy());
+      const readHandshake = (chunk: Buffer) => {
+        pending = Buffer.concat([pending, chunk]);
+        const end = pending.indexOf("\r\n\r\n");
+        if (end === -1) {
+          if (pending.length > http.maxHeaderSize) socket.destroy();
+          return;
         }
-        upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
-        if (head.length > 0) upstream.write(head);
-        socket.pipe(upstream);
-        upstream.pipe(socket);
-      });
-      upstream.on("error", () => socket.destroy());
-      socket.on("error", () => upstream.destroy());
+        const lines = pending.toString("latin1", 0, end).split("\r\n");
+        if (
+          end > http.maxHeaderSize ||
+          !lines[0]?.startsWith("GET ") ||
+          !lines.some((line) => /^upgrade:\s*websocket\s*$/i.test(line))
+        ) {
+          socket.destroy();
+          return;
+        }
+        socket.pause();
+        socket.off("data", readHandshake);
+        socket.setTimeout(0);
+        const upstream = net.connect(Number(runtimeEntryURL.port), runtimeEntryURL.hostname, () => {
+          for (let i = 1; i < lines.length; i++) {
+            const name = lines[i]!.split(":", 1)[0]!.toLowerCase();
+            if (name === "host") lines[i] = `Host: ${runtimeEntryURL.host}`;
+            if (name === opSecretHeaderLower) lines[i] = `${name}: ${brokerProxySecret}`;
+          }
+          upstream.write(`${lines.join("\r\n")}\r\n\r\n`, "latin1");
+          upstream.write(pending.subarray(end + 4));
+          pending = Buffer.alloc(0);
+          socket.pipe(upstream);
+          upstream.pipe(socket);
+        });
+        socket.on("close", () => upstream.destroy());
+        upstream.on("error", () => socket.destroy());
+        upstream.on("close", () => socket.destroy());
+      };
+      socket.on("data", readHandshake);
     });
     // No idle timeout: test processes reuse a kept-alive connection, and one the server closed after
     // Node's 5 s default while a process waited for a slot or ran a long test was reset as its next
     // request went out on it ("fetch failed").
     proxyServer.keepAliveTimeout = 0;
-    await new Promise<void>((resolve, reject) => {
-      proxyServer.once("error", reject);
-      proxyServer.listen(0, "127.0.0.1", () => resolve());
-    });
-    const address = proxyServer.address();
-    if (!address || typeof address === "string") throw new Error("SharedSlotBrokerDaemon failed to bind TCP address");
-    return { proxyServer, proxyUrl: `http://127.0.0.1:${address.port}` };
+    const listen = async (server: http.Server | net.Server) => {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", () => resolve());
+      });
+      const { port } = server.address() as net.AddressInfo;
+      return `http://127.0.0.1:${port}`;
+    };
+    const proxyUrl = await listen(proxyServer);
+    try {
+      return { proxyServer, proxyUrl, upgradeServer, upgradeUrl: await listen(upgradeServer) };
+    } catch (error) {
+      proxyServer.close();
+      throw error;
+    }
   };
 
   const startRuntime = async (): Promise<Runtime> => {
@@ -301,14 +333,13 @@ const runDaemon = async () => {
       }
       slotProxyBindings[slotSupervisorName] = bindings;
     }
-    const { proxyServer, proxyUrl } = await createProxyServer(runtimeEntryURL, brokerProxySecret);
+    const proxy = await createProxyServer(runtimeEntryURL, brokerProxySecret);
     return {
       server,
       capturedDevEnvs,
       storageRoot,
       proxyClient,
-      proxyServer,
-      proxyUrl,
+      ...proxy,
       slotProxyBindings,
       slotServiceKeys,
       freeSlots: Array.from({ length: config.slotCount }, (_, index) => index),
@@ -317,6 +348,7 @@ const runDaemon = async () => {
 
   const closeRuntime = async (runtime: Runtime) => {
     try {
+      runtime.upgradeServer.close();
       runtime.proxyServer.close();
     } catch {}
     await runtime.server.close().catch(() => {});
@@ -419,6 +451,7 @@ const runDaemon = async () => {
           leaseId,
           proxyBindings: runtime.slotProxyBindings[supervisorName],
           proxyUrl: runtime.proxyUrl,
+          upgradeUrl: runtime.upgradeUrl,
           runId,
           serviceKey: runtime.slotServiceKeys[supervisorName],
           slotIndex: index,

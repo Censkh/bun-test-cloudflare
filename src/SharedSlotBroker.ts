@@ -149,6 +149,7 @@ type LeaseResponse = {
   proxyBindings: Record<string, string>;
   /** Where the lease's runtime takes ProxyClient requests. */
   proxyUrl: string;
+  upgradeUrl: string;
   runId: string;
   serviceKey: string;
   slotIndex: number;
@@ -323,13 +324,22 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
   }
 
   /** The ProxyClient for a lease's runtime: a broker started again since has another URL. */
-  #proxyClientFor(proxyUrl: string) {
+  #proxyClientFor(proxyUrl: string, upgradeUrl: string) {
     if (this.#proxyClient?.url !== proxyUrl) {
       void this.#disposeProxyClient();
       const miniflare = getMiniflareClientModule();
       // Miniflare's fetch reads its init's dispatcher unconditionally, and a WebSocket upgrade
       // through the proxy dispatches without one.
-      const client = new miniflare.ProxyClient(proxyUrl, (input, init) => miniflare.fetch(input, init ?? {}));
+      const client = new miniflare.ProxyClient(proxyUrl, (input, init) => {
+        const request = typeof input === "object" && "headers" in input ? input : undefined;
+        const headers = new Headers(init?.headers ?? request?.headers);
+        if (headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const url = new URL(request?.url ?? String(input));
+          url.host = new URL(upgradeUrl).host;
+          return miniflare.fetch(url, { redirect: request?.redirect, ...init, headers });
+        }
+        return miniflare.fetch(input, init ?? {});
+      });
       this.#proxyClient = { url: proxyUrl, client: Promise.resolve(client.warm?.()).then(() => client) };
     }
     return this.#proxyClient.client;
@@ -457,7 +467,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
       throw new Error(`Failed leasing shared Cloudflare slot (${response.status}): ${await response.text()}`);
     }
     const lease = (await response.json()) as LeaseResponse;
-    return { endpoint, lease, proxyClient: await this.#proxyClientFor(lease.proxyUrl) };
+    return { endpoint, lease, proxyClient: await this.#proxyClientFor(lease.proxyUrl, lease.upgradeUrl) };
   }
 
   async acquire(): Promise<HarnessRunLease<TWorkers>> {
