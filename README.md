@@ -21,7 +21,7 @@ bun add -d bun-test-cloudflare
 
 ## Wrangler Compatibility
 
-`bun-test-cloudflare` requires `wrangler >= 4.104.0`.
+`bun-test-cloudflare` requires `wrangler >= 4.104.0`. CI tests Wrangler 4.104.0, 4.110.0, and the latest release against Bun 1.3.14, 1.4.2, and canary.
 
 Wrangler 4.151.3 and later refuse to dispatch requests under Bun, because Bun's own `fetch()` ignores the undici dispatcher Miniflare uses. The setup gives Miniflare the real undici package, so it also turns that check off (the `wrangler-bun-detection` patch). This loads Wrangler while the preload runs.
 
@@ -112,7 +112,7 @@ test("calls the backend worker", async () => {
 });
 ```
 
-`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. The pool closes, stopping its workerd processes, when the test, `describe` block or file that created the harness ends; a harness used again after that, such as one a shared module creates while the first test file imports it, starts a new pool on its next run. When test files share one global, a file's pool is kept for the next file instead (see [Reusing runtimes across test files](#reusing-runtimes-across-test-files)). A harness created in a `beforeAll` hook keeps its pool until the whole run ends, since Bun would end a scope tied to that hook before the tests it prepares for. Scope tracking needs the `bun-test-cloudflare/setup` preload. While another harness takes leases, a harness also closes the prewarmed servers nothing is using, so only the harness in use keeps workerd processes ready; runs in progress are left alone. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
+`run()` leases a prewarmed Wrangler test server, resets its persistent storage before reuse, and returns it to the pool after the callback. For a process-local pool, the harness stops its workerd processes when the test, `describe` block or file that created the harness ends; a harness used again after that, such as one a shared module creates while the first test file imports it, starts a new pool on its next run. When test files share one global, a file's pool is kept for the next file instead (see [Reusing runtimes across test files](#reusing-runtimes-across-test-files)). A harness created in a `beforeAll` hook keeps its pool until the whole run ends, since Bun would end a scope tied to that hook before the tests it prepares for. Scope tracking needs the `bun-test-cloudflare/setup` preload. While another harness takes leases, a harness also closes the prewarmed servers nothing is using, so only the harness in use keeps workerd processes ready; runs in progress are left alone. Set `BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM=1` to create and close a server for every `run()`.
 
 ### When the runtime dies
 
@@ -130,15 +130,31 @@ const harness = createCloudflareHarness({
 });
 ```
 
-Eligible harnesses use four isolated slots by default. Each slot has namespaced Cache API access and unique D1, KV, R2, queue and Durable Object storage, which is reset after every run. A slot's Worker isolates serve its runs one after another, one isolate for each set of vars the runs give a Worker, so module-level state in a Worker's code (a cache in a global, say) lasts from one run to the next with the same vars in that slot, as it does from one request to the next in production; each run still gets its own bindings, vars and `process.env`. Harnesses with unsupported bindings automatically use the single-slot reset path; explicitly requesting multiple slots with unsupported bindings throws.
+Eligible harnesses use four isolated slots by default. Each slot has namespaced Cache API access and unique D1, KV, R2, queue and Durable Object storage, which is reset after every run. A slot's Worker isolates serve its runs one after another, one isolate for each set of vars the runs give a Worker, so module-level state in a Worker's code (a cache in a global, say) lasts from one run to the next with the same vars in that slot, as it does from one request to the next in production; each run still gets its own bindings, vars and `process.env`. A harness with unsupported bindings uses the single-slot reset path even when you request multiple slots.
 
 `prewarmedWorkerdPoolSize` defaults to `1`, avoiding duplicate startup and memory costs. Set it to `2` or higher only when tests need concurrent harness leases; another ready pool member can then serve leases while a generation rebuilds.
 
 Use the `workers` handles, `server.fetch()`, or `server.getWorker()` supplied to `run()` so requests follow the active slot. A URL returned by `server.listen()` addresses the generation's first physical Worker and should not be used with slotted harnesses.
 
+### Per-run vars and queue consumers
+
+Use `harness.with()` to override vars by Worker key and control whether queued messages reach their consumers. A variant shares the original runtime when isolated slots are available. On the single-slot path it creates a separate harness.
+
+```ts
+const paused = harness.with({
+  vars: { BACKEND: { APP_ENV: "integration" } },
+  consumeQueues: false,
+});
+await paused.run(async (workers) => {
+  await workers.BACKEND.fetch("https://example.com/health");
+});
+```
+
+To keep a D1 schema across isolated runs, set `d1ResetMode: "truncate"` when creating the harness. The reset clears rows and resets autoincrement sequences. The default, `"drop"`, also removes the tables.
+
 ### Sharing one slot across a suite
 
-Every `run()` leases a fresh slot, so a file of short tests waits for a new workerd generation every few tests. A suite whose tests keep their data apart (for example, each in a project of its own) can hold one slot instead:
+Each standalone `run()` leases a clean slot and releases it afterward. A suite whose tests keep their data apart (for example, each in a project of its own) can hold one slot instead:
 
 ```ts
 let lease: Awaited<ReturnType<typeof harness.lease>>;
@@ -158,13 +174,13 @@ Runs in a lease never overlap. Each one waits for the background work it started
 
 ### Reusing runtimes across test files
 
-Each test file otherwise starts its own workerd runtime. When the files a Bun process runs share one global (Bun's default without `--parallel`, or `bun test --parallel --no-isolate`), the pool of a harness created for a whole file outlives that file: the next file that creates a harness with the same config, such as one from a shared factory, takes it over, so a process starts workerd once rather than once per file: each file after the first saves a workerd start (most of a second) and the runtime the pool prewarmed beside it. The runtime is reset between files exactly as between tests, so each file still starts from clean storage.
+On macOS and Linux, parallel Bun test workers with matching configurations can share a workerd runtime through a broker, including when Bun isolates the test files. Each run leases its own slot. The lease request carries that run’s Worker vars and queue-consumption settings, so processes can share a runtime even when their vars differ. Set `BUN_TEST_CLOUDFLARE_SHARED_SLOTS=0` to disable cross-process sharing.
+
+Within a single Bun process, files that share a global can also reuse a file-scoped harness pool when the config and hook functions match. This works with Bun’s default serial execution or with:
 
 ```sh
 bun test --parallel --no-isolate
 ```
-
-Nothing needs configuring. A harness matches only one made from the same config with the same hook functions, so a file with a config of its own starts its own runtime. A harness a test or `describe` block created still stops its workerd when that scope ends; only a file's pool is kept. Isolated files (`--isolate`, or `--parallel` alone) can't see each other's pools, so each closes its own as before.
 
 `--no-isolate` keeps Bun's own state across files too: a file's `mock.module()`, `spyOn()`, globals and `process.env` changes are visible to the files after it in that worker. Use it for suites whose files undo what they change.
 
