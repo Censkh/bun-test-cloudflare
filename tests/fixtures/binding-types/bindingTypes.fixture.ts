@@ -38,7 +38,7 @@ const harness = createCloudflareHarness({
 });
 
 type SlottedBindingEnv = {
-  COUNTER: DurableObjectNamespace;
+  COUNTER: DurableObjectNamespace<import("./src/slotted").SlotCounter>;
   DB: D1Database;
   IMAGES: ImagesBinding;
   JSON_VALUE: { enabled: boolean };
@@ -135,6 +135,18 @@ describe("locally simulated Cloudflare bindings", () => {
       expect(workflow.id).toStartWith("binding-types-");
       expect(["complete", "queued", "running", "waiting"]).toContain((await workflow.status()).status);
     });
+  });
+});
+
+test("a slotted object starts the calls made to it in the order they were made", async () => {
+  await slottedHarness.run(async (workers) => {
+    const env = await workers.SLOTTED.getEnv();
+    const object = () => env.COUNTER.get(env.COUNTER.idFromName("ordered"));
+    // Made at once, each through a stub of its own, as a batcher sends several calls to the same
+    // object before any returns.
+    const calls = Array.from({ length: 300 }, (_, index) => index);
+    await Promise.all(calls.map((index) => object().record(index)));
+    expect(await object().started()).toEqual(calls);
   });
 });
 

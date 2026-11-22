@@ -5,6 +5,17 @@ type Env = {
 };
 
 export class SlotCounter extends DurableObject {
+  // The calls it has started, in the order they started.
+  #started: number[] = [];
+
+  record(value: number) {
+    this.#started.push(value);
+  }
+
+  started() {
+    return this.#started;
+  }
+
   async fetch() {
     const count = ((await this.ctx.storage.get<number>("count")) ?? 0) + 1;
     await this.ctx.storage.put("count", count);

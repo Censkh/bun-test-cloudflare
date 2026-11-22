@@ -109,6 +109,9 @@ type SlotProxyStub = {
   recordTouchedDo(bindingName: string, hex: string): Promise<void>;
 };
 
+/** A call's place among its stub's calls in flight: the host starts each train's calls in order. */
+type CallOrder = { train: string; seq: number };
+
 const fenceDurableObjectBinding = (
   rawNamespace: DurableObjectNamespace,
   supBinding: string,
@@ -132,6 +135,27 @@ const fenceDurableObjectBinding = (
     return wrapped;
   };
 
+  // The runtime delivers the calls an isolate makes to an object in the order they were made, but
+  // each goes to the object as a request of its own here, and one can overtake another: the host
+  // starts them in order. Counted per object, not per stub, as callers commonly get a stub for
+  // each call. A call made with nothing in flight to its object needs no order: a new train.
+  const objectCalls = new Map<string, { train: string; seq: number; inFlight: number }>();
+  const callsTo = (hex: string) => ({
+    next: (): CallOrder => {
+      let calls = objectCalls.get(hex);
+      if (!calls) objectCalls.set(hex, (calls = { train: "", seq: 0, inFlight: 0 }));
+      if (calls.inFlight++ === 0) {
+        calls.train = crypto.randomUUID();
+        calls.seq = 0;
+      } else calls.seq++;
+      return { train: calls.train, seq: calls.seq };
+    },
+    done: () => {
+      const calls = objectCalls.get(hex)!;
+      if (--calls.inFlight === 0) objectCalls.delete(hex);
+    },
+  });
+
   const ensureRecorded = (hex: string) => {
     if (!slotProxy || recorded.has(hex)) return;
     recorded.add(hex);
@@ -142,9 +166,10 @@ const fenceDurableObjectBinding = (
     fence.assertActive();
     const nativeId = (unwrappedProxies.get(id) as DurableObjectId | undefined) ?? id;
     const rawStub = rawNamespace.get(nativeId) as unknown as DurableObjectStub & {
-      __btcf_rpc(prop: string, args: unknown[]): Promise<unknown>;
+      __btcf_rpc(prop: string, args: unknown[], order: CallOrder): Promise<unknown>;
     };
     const hex = nativeId.toString();
+    const calls = callsTo(hex);
     const name = originalNames.get(nativeId) ?? id.name;
 
     return new Proxy({} as DurableObjectStub, {
@@ -161,11 +186,16 @@ const fenceDurableObjectBinding = (
               return rawStub.fetch(input as any, init as any);
             });
         }
-        // Calls reach the object concurrently, as the runtime's own stubs do.
+        // Calls run in the object concurrently, as the runtime's own stubs' do, started in order.
         return (...args: unknown[]) =>
-          fence.dispatch(() => {
+          fence.dispatch(async () => {
             ensureRecorded(hex);
-            return rawStub.__btcf_rpc(String(property), args);
+            const order = calls.next();
+            try {
+              return await rawStub.__btcf_rpc(String(property), args, order);
+            } finally {
+              calls.done();
+            }
           });
       },
     });

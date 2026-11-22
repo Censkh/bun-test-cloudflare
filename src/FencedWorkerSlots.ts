@@ -343,13 +343,70 @@ const __wrapDurableObject_${className} = (SLOT_PROXY) => class extends DurableOb
     return cachesAls.run(storage, () => runVarsAls.run(vars, fn));
   }
 
-  async __btcf_rpc(prop, args) {
-    const runId = this.#getRunId();
-    const proxy = this.env[SLOT_PROXY].getByName("slot");
-    return this.#withCaches(runId, proxy, async () => {
-      const instance = await this.#getInstance();
-      return await instance[prop](...args);
-    });
+  // Calls reach the object's methods in the order they were made, each as an event of its own, as
+  // the runtime delivers a stub's calls. A call from the test process comes as a request of its
+  // own, which can overtake an earlier one, so it says where it stands among its stub's calls in
+  // flight (its order: train and place); others keep the order they arrived in. This host also
+  // awaits the run's vars and instance first: without the turn, a call that found them ready
+  // would overtake an earlier one still waiting, or interleave with an earlier call's already
+  // settled awaits, which the runtime runs to their end first (a batch's messages, one after
+  // another).
+  #trains = new Map();
+  #lastArrived = Promise.resolve();
+
+  #turnOf(order) {
+    if (!order) {
+      const turn = this.#lastArrived;
+      let release;
+      this.#lastArrived = new Promise((resolve) => (release = resolve));
+      return { turn, release: () => setTimeout(release, 0) };
+    }
+    const now = Date.now();
+    for (const [key, train] of this.#trains)
+      if (!train.running && !train.waiting.size && now - train.touched > TRAIN_IDLE_MS) this.#trains.delete(key);
+    let train = this.#trains.get(order.train);
+    if (!train) this.#trains.set(order.train, (train = { next: 0, running: 0, waiting: new Map(), touched: now }));
+    train.running++;
+    let released = false;
+    const turn =
+      order.seq <= train.next ? undefined : new Promise((resolve) => train.waiting.set(order.seq, resolve));
+    return {
+      turn,
+      release: () => {
+        if (released) return;
+        released = true;
+        train.running--;
+        train.touched = Date.now();
+        train.next = Math.max(train.next, order.seq + 1);
+        const next = train.waiting.get(train.next);
+        if (next) {
+          train.waiting.delete(train.next);
+          setTimeout(next, 0);
+        }
+      },
+    };
+  }
+
+  async __btcf_rpc(prop, args, order) {
+    const { turn, release } = this.#turnOf(order);
+    try {
+      const runId = this.#getRunId();
+      const proxy = this.env[SLOT_PROXY].getByName("slot");
+      return await this.#withCaches(runId, proxy, async () => {
+        const instance = await this.#getInstance();
+        await turn;
+        let result;
+        try {
+          result = instance[prop](...args);
+        } finally {
+          release();
+        }
+        return await result;
+      });
+    } finally {
+      // A call that failed before its turn lets the next go on.
+      release();
+    }
   }
 
   async fetch(request) {
@@ -469,6 +526,8 @@ import {
 
 const SPEC = ${JSON.stringify(spec)};
 const WORKER_NAME = ${JSON.stringify(workerName)};
+// A stub's train of calls is forgotten once nothing of it has run or waited for this long.
+const TRAIN_IDLE_MS = 60_000;
 const cachesAls = new AsyncLocalStorage();
 const originalCaches = globalThis.caches;
 
