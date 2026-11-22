@@ -284,7 +284,7 @@ export default {
       return new Response(null, { status: 204 });
     }
     return loadRunWorker(env.LOADER, runId, "fixture", () => ({
-      compatibilityDate: "2026-09-09",
+      compatibilityDate: "2026-06-30",
       mainModule: "worker.js",
       modules: { "worker.js": child },
       globalOutbound: null,

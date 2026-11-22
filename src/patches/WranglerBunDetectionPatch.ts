@@ -50,7 +50,9 @@ export const installWranglerBunDetectionPatch = () => {
   wranglerModule.paths = (Module as ModuleWithNodeModulePaths)._nodeModulePaths(path.dirname(wranglerPath));
   localRequire.cache[wranglerPath] = wranglerModule;
   try {
-    wranglerModule._compile(patchedSource, wranglerPath);
+    // Newer Wrangler bundles construct DevEnv through a local binding. Route those constructions
+    // through the exported constructor so the harness can capture its own runtime on startup.
+    wranglerModule._compile(patchedSource.replaceAll("new DevEnv(", "new exports.unstable_DevEnv("), wranglerPath);
   } catch (error) {
     delete localRequire.cache[wranglerPath];
     throw error;

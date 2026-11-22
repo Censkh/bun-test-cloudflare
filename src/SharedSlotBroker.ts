@@ -163,7 +163,7 @@ type MiniflareClientModule = {
   ) => {
     dispose(): Promise<void>;
     env: Record<string, any>;
-    warm(): Promise<void>;
+    warm?(): Promise<void>;
   };
 };
 
@@ -330,7 +330,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
       // Miniflare's fetch reads its init's dispatcher unconditionally, and a WebSocket upgrade
       // through the proxy dispatches without one.
       const client = new miniflare.ProxyClient(proxyUrl, (input, init) => miniflare.fetch(input, init ?? {}));
-      this.#proxyClient = { url: proxyUrl, client: client.warm().then(() => client) };
+      this.#proxyClient = { url: proxyUrl, client: Promise.resolve(client.warm?.()).then(() => client) };
     }
     return this.#proxyClient.client;
   }
@@ -465,7 +465,11 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
     // A broker whose runtime crashed, or that its parent's exit stopped, is gone for every test
     // process: one that can't be reached is replaced once, as a process's own runtime would be.
     const { endpoint, lease, proxyClient } = await this.#lease(liveVars).catch(async (error: unknown) => {
-      const unreachable = error instanceof TypeError || /ECONNREFUSED|ECONNRESET|socket/i.test(String(error));
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      const unreachable =
+        code === "ConnectionRefused" ||
+        error instanceof TypeError ||
+        /ECONNREFUSED|ECONNRESET|socket/i.test(String(error));
       if (this.#closed || !unreachable) throw error;
       await this.#disconnect();
       return this.#lease(liveVars);

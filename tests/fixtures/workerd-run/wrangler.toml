@@ -1,6 +1,6 @@
 name = "workerd-run"
 main = "worker.ts"
-compatibility_date = "2026-09-09"
+compatibility_date = "2026-06-30"
 compatibility_flags = ["nodejs_compat"]
 
 [[worker_loaders]]

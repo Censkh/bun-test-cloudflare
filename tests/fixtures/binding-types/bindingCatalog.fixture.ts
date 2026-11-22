@@ -90,6 +90,7 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
     "worker_loader",
     "workflow",
   ]);
+  const wrappedBindings = semver.satisfies(require("wrangler/package.json").dependencies.workerd, ">=1.20260807.2");
   expect(
     [
       ...new Set(
@@ -101,11 +102,11 @@ test("classifies every binding kind emitted by Wrangler for isolated slots", () 
   ).toEqual([
     "analytics_engine",
     "assets",
-    "browser",
+    ...(wrappedBindings ? ["browser"] : []),
     "d1",
     "durable_object_namespace",
     "hyperdrive",
-    "images",
+    ...(wrappedBindings ? ["images"] : []),
     "json",
     "kv_namespace",
     "plain_text",

@@ -24,7 +24,6 @@ test("fenced Worker slots accept resettable storage and immutable value bindings
       workerInput({
         d1_databases: [{ binding: "DB", database_id: "database", database_name: "database" }],
         durable_objects: { bindings: [{ class_name: "Counter", name: "COUNTER" }] },
-        images: { binding: "IMAGES" },
         kv_namespaces: [{ binding: "KV", id: "namespace" }],
         r2_buckets: [{ binding: "BUCKET", bucket_name: "bucket" }],
         vars: { JSON: { enabled: true }, TEXT: "value" },
@@ -38,7 +37,6 @@ test("fenced Worker slots accept queues, static assets and bindings every slot c
   for (const binding of [
     { dataset: "events", type: "analytics_engine" },
     { directory: "./assets", type: "assets" },
-    { type: "browser" },
     { id: "hyperdrive", localConnectionString: "postgres://localhost/db", type: "hyperdrive" },
     { queue: "jobs", queue_name: "jobs", type: "queue" },
     { type: "send_email" },

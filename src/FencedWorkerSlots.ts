@@ -26,6 +26,8 @@ import {
   type FencedWorkerSpec,
 } from "./FencedEnvBridge";
 
+const slotCompatibilityDate = "2026-06-30";
+
 type WorkerInput = TestHarnessOptions["workers"][number];
 type InlineWorkerInput = Extract<WorkerInput, { config: unknown }>;
 
@@ -76,9 +78,7 @@ const getInlineConfig = (input: WorkerInput) => {
 const SHARED_SLOT_BINDINGS = new Set([
   "analytics_engine",
   "assets",
-  "browser",
   "hyperdrive",
-  "images",
   "json",
   "plain_text",
   "send_email",
@@ -94,14 +94,16 @@ const SHARED_SLOT_BINDINGS = new Set([
 export const wranglerKeepsSecondaryRateLimits = (wranglerVersion: string) =>
   semver.satisfies(wranglerVersion, ">=4.108.0");
 
-const slotsKeepRateLimits = wranglerKeepsSecondaryRateLimits(
-  (require("wrangler/package.json") as { version: string }).version,
-);
+const wranglerPackage = require("wrangler/package.json") as { version: string; dependencies: { workerd: string } };
+const slotsKeepRateLimits = wranglerKeepsSecondaryRateLimits(wranglerPackage.version);
+// Earlier workerd releases cannot serialize these wrapped bindings into a Worker Loader's env.
+const slotsCanLoadWrappedBindings = semver.satisfies(wranglerPackage.dependencies.workerd, ">=1.20260807.2");
 
 export const isSupportedSlotBinding = (
   binding: { [key: string]: unknown; type: string },
   workerNames: Set<string>,
 ): boolean => {
+  if (binding.type === "images" || binding.type === "browser") return slotsCanLoadWrappedBindings;
   if (binding.type === "d1") return typeof binding.database_id === "string";
   if (binding.type === "kv_namespace") return typeof binding.id === "string";
   if (binding.type === "r2_bucket") return typeof binding.bucket_name === "string";
@@ -955,7 +957,7 @@ export const createFencedWorkerSlots = (
     const mainModule = path.relative(baseDir, config.main).split(path.sep).join("/");
     const spec: FencedWorkerSpec = {
       bindings,
-      compatibilityDate: config.compatibility_date ?? "2026-09-09",
+      compatibilityDate: config.compatibility_date ?? slotCompatibilityDate,
       compatibilityFlags: Array.isArray(config.compatibility_flags) ? config.compatibility_flags : [],
       mainModule,
       name: worker.name,
@@ -1495,10 +1497,9 @@ export default {
     );
   }
 
-  const minSupervisorCompatibilityDate = "2026-09-09";
   const maxCompatibilityDate =
-    [minSupervisorCompatibilityDate, ...workerSpecs.map((spec) => spec.compatibilityDate)].sort().at(-1) ??
-    minSupervisorCompatibilityDate;
+    [slotCompatibilityDate, ...workerSpecs.map((spec) => spec.compatibilityDate)].sort().at(-1) ??
+    slotCompatibilityDate;
 
   const slotSupervisorNames: string[] = [];
   const inputs: WorkerInput[] = [];
