@@ -10,7 +10,7 @@ export const installChildProcessExtraFdPatch = () => {
 
   const originalConnect = net.connect;
 
-  net.connect = function bunTestCloudflareConnect(...args: any[]) {
+  net.connect = function bunTestCloudflareConnect(this: unknown, ...args: any[]) {
     const options = args[0];
 
     // Bun's node:child_process wraps stdio fds >= 3 with net.connect({ fd }).

@@ -1,8 +1,15 @@
+import type { FencedRunSettings } from "./FencedEnvBridge";
 import type { HarnessRun } from "./HarnessRun";
+
+/** What a harness variant's run sets over its harness's config, by Worker name. */
+export type RunVariant = {
+  vars: Record<string, Record<string, unknown>>;
+  settings: FencedRunSettings;
+};
 
 export type HarnessRunLease<TWorkers extends Record<string, any>> = {
   release(): Promise<void>;
-  run: HarnessRun<TWorkers>;
+  run: Pick<HarnessRun<TWorkers>, "configure" | "execute" | "settle">;
 };
 
 export type ServerOrchestrator<TWorkers extends Record<string, any>> = {

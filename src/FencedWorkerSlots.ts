@@ -18,6 +18,7 @@ import type { TestHarnessOptions } from "wrangler";
 import { unstable_convertConfigBindingsToStartWorkerBindings } from "wrangler";
 import {
   BTCF_META_HEADER,
+  BTCF_ORIGIN_HEADER,
   BTCF_RUN_ID_HEADER,
   BTCF_SECRET_HEADER,
   BTCF_WORKER_HEADER,
@@ -45,6 +46,7 @@ const RUNTIME_FILES = [
   "WorkerdR2.ts",
   "WorkerdRateLimit.ts",
   "WorkerdRun.ts",
+  "WorkerdWorkflow.ts",
 ] as const;
 
 let cachedTranspiledRuntime: Record<string, string> | undefined;
@@ -80,6 +82,8 @@ const SHARED_SLOT_BINDINGS = new Set([
   "json",
   "plain_text",
   "send_email",
+  // Not stored locally, so slots share it, as they share Images.
+  "vectorize",
   "version_metadata",
 ]);
 
@@ -113,6 +117,14 @@ export const isSupportedSlotBinding = (
   }
   if (binding.type === "queue") return typeof binding.queue_name === "string";
   if (binding.type === "ratelimit") return slotsKeepRateLimits && typeof binding.namespace_id === "string";
+  if (binding.type === "workflow") {
+    return (
+      typeof binding.name === "string" &&
+      typeof binding.class_name === "string" &&
+      (binding.script_name === undefined ||
+        (typeof binding.script_name === "string" && workerNames.has(binding.script_name)))
+    );
+  }
   return SHARED_SLOT_BINDINGS.has(binding.type);
 };
 
@@ -122,7 +134,6 @@ export const canUseFencedWorkerSlots = (workers: Array<{ input: WorkerInput; nam
     return workers.every(({ input }) => {
       const config = getInlineConfig(input);
       if (Array.isArray(config.containers) && config.containers.length > 0) return false;
-      if (Array.isArray(config.workflows) && config.workflows.length > 0) return false;
       const bindings = unstable_convertConfigBindingsToStartWorkerBindings(config);
       return Object.values(bindings).every((binding) =>
         isSupportedSlotBinding(binding as { [key: string]: unknown; type: string }, workerNames),
@@ -136,11 +147,17 @@ export const canUseFencedWorkerSlots = (workers: Array<{ input: WorkerInput; nam
 const appendSlot = (value: string, slot: number) => `${value}--btcf-slot-${slot}`;
 
 const getSupervisorName = (slot: number) => `__btcf-supervisor--slot-${slot}`;
+/** The runtime's one copy of every fenced Worker's code, which each slot's supervisor loads from. */
+const MODULE_STORE_NAME = "__btcf-module-store";
 
-const getDoHostName = (workerName: string, slot: number) => {
-  const suffix = `--btcf-do-${slot}`;
+/** The Worker that hosts a Worker's Durable Object and Workflow classes for every slot. */
+const getDoHostName = (workerName: string) => {
+  const suffix = "--btcf-do";
   return `${workerName.slice(0, Math.max(1, 63 - suffix.length))}${suffix}`;
 };
+
+/** A slot's copy of a Durable Object or Workflow class in its Worker's host. */
+const getSlotClassName = (className: string, slot: number) => `${className}__btcf_slot${slot}`;
 
 const linkOrCopy = (source: string, destination: string) => {
   mkdirSync(path.dirname(destination), { recursive: true });
@@ -246,12 +263,23 @@ const collectOwnedDoClasses = (workers: Array<{ input: WorkerInput; name: string
 const writeDoHostWrapper = (options: {
   baseDir: string;
   classes: string[];
+  /** The Workflow classes the Worker owns, each run by a wrapper that gives it its run's bindings. */
+  workflowClasses: string[];
+  /** The slot's binding for each Durable Object class the Worker owns, for its run's `ctx.exports`. */
+  exportedDoBindings: Record<string, string>;
   main: string;
+  slotCount: number;
   secret: string;
   spec: FencedWorkerSpec;
   workerName: string;
 }): { wrapperPath: string; runtimeFiles: string[] } => {
-  const { baseDir, classes, main, secret, spec, workerName } = options;
+  const { baseDir, classes, exportedDoBindings, main, secret, slotCount, spec, workerName, workflowClasses } = options;
+  const slotExports = (className: string, factory: string) =>
+    Array.from(
+      { length: slotCount },
+      (_, slot) =>
+        `export class ${getSlotClassName(className, slot)} extends ${factory}(${JSON.stringify(`__BTCF_SLOT_PROXY_${slot}`)}) {}`,
+    ).join("\n");
   const runtimeDir = path.join(baseDir, "btcf-runtime");
   mkdirSync(runtimeDir, { recursive: true });
   const runtimeModules = getTranspiledRuntime();
@@ -269,10 +297,12 @@ const writeDoHostWrapper = (options: {
   const classDecls = classes
     .map(
       (className) => `
-export class ${className} extends DurableObject {
+// Each slot's copy of ${className}, run against that slot's supervisor (SLOT_PROXY).
+const __wrapDurableObject_${className} = (SLOT_PROXY) => class extends DurableObject {
   #instance;
   #runId;
   #originalName;
+  #vars;
 
   constructor(ctx, env) {
     super(ctx, env);
@@ -286,45 +316,53 @@ export class ${className} extends DurableObject {
     return this.#runId;
   }
 
+  // The run's vars, read once: an instance serves one run.
+  #getVars() {
+    this.#vars ??= this.env[SLOT_PROXY].getByName("slot").getRuntimeVars(WORKER_NAME);
+    return this.#vars;
+  }
+
   #getInstance() {
-    if (!this.#instance) {
+    this.#instance ??= (async () => {
       const runId = this.#getRunId();
-      const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
-      const fencedEnv = buildDoFencedEnv(runId, proxy, this.env);
+      const proxy = this.env[SLOT_PROXY].getByName("slot");
+      const fencedEnv = buildDoFencedEnv(runId, proxy, this.env, await this.#getVars());
       const OriginalClass = __userModule[${JSON.stringify(className)}];
       if (!OriginalClass) throw new Error("Missing Durable Object export ${className}");
-      this.#instance = new OriginalClass(this.ctx, fencedEnv);
-    }
+      return new OriginalClass(fenceCtx(this.ctx, runId, proxy), fencedEnv);
+    })();
     return this.#instance;
   }
 
-  #withCaches(runId, proxy, fn) {
+  // Runs fn as the run: its caches, and its vars in process.env.
+  async #withCaches(runId, proxy, fn) {
     const storage = createRunCacheStorage((op) => proxy.invoke(runId, { name: "cache", args: [op] }));
-    return cachesAls.run(storage, fn);
+    const vars = (await this.#getVars()) ?? {};
+    return cachesAls.run(storage, () => runVarsAls.run(vars, fn));
   }
 
   async __btcf_rpc(prop, args) {
     const runId = this.#getRunId();
-    const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
     return this.#withCaches(runId, proxy, async () => {
-      const instance = this.#getInstance();
+      const instance = await this.#getInstance();
       return await instance[prop](...args);
     });
   }
 
   async fetch(request) {
     const runId = this.#getRunId();
-    const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
     if (!(await proxy.isActive(runId))) throw new Error(runEnded);
     return this.#withCaches(runId, proxy, async () => {
-      const instance = this.#getInstance();
+      const instance = await this.#getInstance();
       return await instance.fetch(request);
     });
   }
 
   async alarm(alarmInfo) {
     const runId = this.#runId;
-    const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
     if (!runId || !(await proxy.isActive(runId))) {
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
@@ -332,7 +370,7 @@ export class ${className} extends DurableObject {
       return;
     }
     return this.#withCaches(runId, proxy, async () => {
-      const instance = this.#getInstance();
+      const instance = await this.#getInstance();
       if (typeof instance.alarm === "function") {
         return await instance.alarm(alarmInfo);
       }
@@ -341,20 +379,20 @@ export class ${className} extends DurableObject {
 
   async webSocketMessage(ws, message) {
     const runId = this.#runId;
-    const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
     if (!runId || !(await proxy.isActive(runId))) return;
     return this.#withCaches(runId, proxy, async () => {
-      const instance = this.#getInstance();
+      const instance = await this.#getInstance();
       if (typeof instance.webSocketMessage === "function") return await instance.webSocketMessage(ws, message);
     });
   }
 
   async webSocketClose(ws, code, reason, wasClean) {
     const runId = this.#runId;
-    const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
     if (!runId || !(await proxy.isActive(runId))) return;
     return this.#withCaches(runId, proxy, async () => {
-      const instance = this.#getInstance();
+      const instance = await this.#getInstance();
       if (typeof instance.webSocketClose === "function") {
         return await instance.webSocketClose(ws, code, reason, wasClean);
       }
@@ -363,10 +401,10 @@ export class ${className} extends DurableObject {
 
   async webSocketError(ws, error) {
     const runId = this.#runId;
-    const proxy = this.env.__BTCF_SLOT_PROXY.getByName("slot");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
     if (!runId || !(await proxy.isActive(runId))) return;
     return this.#withCaches(runId, proxy, async () => {
-      const instance = this.#getInstance();
+      const instance = await this.#getInstance();
       if (typeof instance.webSocketError === "function") return await instance.webSocketError(ws, error);
     });
   }
@@ -376,12 +414,41 @@ export class ${className} extends DurableObject {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
-}
+};
+${slotExports(className, `__wrapDurableObject_${className}`)}
 `,
     )
     .join("\n");
 
-  const code = `import { DurableObject } from "cloudflare:workers";
+  const workflowDecls = workflowClasses
+    .map(
+      (className) => `
+// Each slot's copy of the ${className} Workflow, run against that slot's supervisor (SLOT_PROXY).
+const __wrapWorkflow_${className} = (SLOT_PROXY) => class extends WorkflowEntrypoint {
+  async run(event, step) {
+    const { __btcf_run: runId, params } = event.payload ?? {};
+    if (!runId) throw new Error("Missing runId on fenced Workflow ${className}");
+    const proxy = this.env[SLOT_PROXY].getByName("slot");
+    if (!(await proxy.isActive(runId))) throw new Error(runEnded);
+    const OriginalClass = __userModule[${JSON.stringify(className)}];
+    if (!OriginalClass) throw new Error("Missing Workflow export ${className}");
+    const runtimeVars = await proxy.getRuntimeVars(WORKER_NAME);
+    const fencedEnv = buildDoFencedEnv(runId, proxy, this.env, runtimeVars);
+    const instance = new OriginalClass(fenceCtx(this.ctx, runId, proxy), fencedEnv);
+    const storage = createRunCacheStorage((op) => proxy.invoke(runId, { name: "cache", args: [op] }));
+    return cachesAls.run(storage, () =>
+      runVarsAls.run(runtimeVars ?? {}, () =>
+        instance.run({ ...event, instanceId: unscopeRunWorkflowInstanceId(event.instanceId), payload: params }, step),
+      ),
+    );
+  }
+};
+${slotExports(className, `__wrapWorkflow_${className}`)}
+`,
+    )
+    .join("\n");
+
+  const code = `import { DurableObject, WorkflowEntrypoint } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as __userModule from ${JSON.stringify(mainRel)};
 import {
@@ -392,11 +459,14 @@ import {
   createRunQueueBinding,
   createRunR2Binding,
   createRunRateLimitBinding,
+  createRunWorkflowBinding,
   parseRunObjectIdentity,
   runEnded,
+  unscopeRunWorkflowInstanceId,
 } from "./btcf-runtime/WorkerdRun.js";
 
 const SPEC = ${JSON.stringify(spec)};
+const WORKER_NAME = ${JSON.stringify(workerName)};
 const cachesAls = new AsyncLocalStorage();
 const originalCaches = globalThis.caches;
 
@@ -414,9 +484,37 @@ Object.defineProperty(globalThis, "caches", {
   },
 });
 
-const buildDoFencedEnv = (runId, proxy, rawEnv) => {
+// process.env holds the host's vars, filled as its isolate starts, and the host serves every
+// slot's runs at once: as each run's code reads it, it has the run's vars over the host's, as a run's
+// own Worker isolate's would.
+const runVarsAls = new AsyncLocalStorage();
+if (typeof process !== "undefined" && process.env) {
+  const runVar = (key) => {
+    const vars = runVarsAls.getStore();
+    return vars && typeof key === "string" && typeof vars[key] === "string" ? vars[key] : undefined;
+  };
+  const view = new Proxy(process.env, {
+    get: (target, key) => runVar(key) ?? Reflect.get(target, key),
+    has: (target, key) => runVar(key) !== undefined || Reflect.has(target, key),
+    ownKeys: (target) => {
+      const vars = runVarsAls.getStore() ?? {};
+      const own = Object.keys(vars).filter((key) => typeof vars[key] === "string");
+      return [...new Set([...Reflect.ownKeys(target), ...own])];
+    },
+    getOwnPropertyDescriptor: (target, key) => {
+      const value = runVar(key);
+      return value === undefined
+        ? Reflect.getOwnPropertyDescriptor(target, key)
+        : { configurable: true, enumerable: true, value, writable: true };
+    },
+  });
+  Object.defineProperty(process, "env", { configurable: true, value: view, writable: true });
+}
+
+// The run's vars over the Worker's own, as its Worker's code gets them.
+const buildDoFencedEnv = (runId, proxy, rawEnv, runtimeVars) => {
   const invoke = (name, op) => proxy.invoke(runId, { name, args: [op] });
-  const env = { ...SPEC.vars };
+  const env = { ...SPEC.vars, ...(runtimeVars ?? {}) };
   for (const [bindingName, desc] of Object.entries(SPEC.bindings)) {
     if (desc.kind === "d1") env[bindingName] = createRunD1Binding((op) => invoke("d1:" + desc.sup, op));
     else if (desc.kind === "kv") env[bindingName] = createRunKVBinding((op) => invoke("kv:" + desc.sup, op));
@@ -424,11 +522,22 @@ const buildDoFencedEnv = (runId, proxy, rawEnv) => {
     else if (desc.kind === "queue") env[bindingName] = createRunQueueBinding((op) => invoke("queue:" + desc.sup, op));
     else if (desc.kind === "do") env[bindingName] = createRunDurableObjectNamespace((op) => invoke("do:" + desc.sup, op));
     else if (desc.kind === "ratelimit") env[bindingName] = createRunRateLimitBinding((op) => invoke("ratelimit:" + desc.sup, op));
+    else if (desc.kind === "workflow") env[bindingName] = createRunWorkflowBinding((op) => invoke("workflow:" + desc.sup, op));
     else if (desc.kind === "service") {
       env[bindingName] = {
         fetch: (input, init) => {
           const req = input instanceof Request && init === undefined ? input : new Request(input, init);
-          return invoke("service:" + desc.target, req);
+          // The request crosses to the slot's supervisor by RPC, which can't carry its signal: it
+          // goes without one, and the signal aborts the call here instead.
+          const signal = req.signal;
+          signal?.throwIfAborted();
+          const sent = invoke("service:" + desc.target, new Request(req, { signal: null }));
+          if (!signal) return sent;
+          return new Promise((resolve, reject) => {
+            const abort = () => reject(signal.reason);
+            signal.addEventListener("abort", abort, { once: true });
+            sent.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+          });
         },
       };
     } else if (desc.kind === "send_email") {
@@ -442,15 +551,35 @@ const buildDoFencedEnv = (runId, proxy, rawEnv) => {
   return env;
 };
 
+// A run's code reaching its own Durable Objects through ctx.exports gets the run's namespaces, as
+// its bindings are: the host's own exports are the slot's wrappers, outside any run.
+const EXPORTED_DO_BINDINGS = ${JSON.stringify(exportedDoBindings)};
+// The base classes take only a real ctx, so its exports are replaced on the ctx itself; each Durable
+// Object or Workflow instance serves one run.
+const fenceCtx = (ctx, runId, proxy) => {
+  const raw = ctx.exports ?? {};
+  const exports = new Proxy(raw, {
+    get(target, name) {
+      const sup = EXPORTED_DO_BINDINGS[name];
+      if (sup) return createRunDurableObjectNamespace((op) => proxy.invoke(runId, { name: "do:" + sup, args: [op] }));
+      return Reflect.get(target, name);
+    },
+  });
+  Object.defineProperty(ctx, "exports", { configurable: true, value: exports });
+  return ctx;
+};
+
 export default { fetch: () => new Response("DO host", { status: 404 }) };
 ${classDecls}
+${workflowDecls}
 `;
   writeFileSync(wrapperPath, code);
   return { wrapperPath, runtimeFiles };
 };
 
-const createDynamicWorkerEntrySource = (spec: FencedWorkerSpec): string => `
+const createDynamicWorkerEntrySource = (spec: FencedWorkerSpec, exportedDoBindings: Record<string, string>): string => `
 import { WorkerEntrypoint } from "cloudflare:workers";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   createRunCacheStorage,
   createRunD1Binding,
@@ -459,54 +588,122 @@ import {
   createRunQueueBinding,
   createRunR2Binding,
   createRunRateLimitBinding,
+  createRunWorkflowBinding,
 } from "./__btcf_runtime/WorkerdRun.js";
 
+// This isolate serves its slot's runs one after another: each call names its run (ctx.props.runId),
+// and its code gets that run's env, caches and vars. Module state lasts from run to run, as it does
+// from request to request in production.
 const SPEC = ${JSON.stringify(spec)};
-let cachedEnv;
+const EXPORTED_DO_BINDINGS = ${JSON.stringify(exportedDoBindings)};
+const RUN_HEADER = "x-btcf-run";
+const runAls = new AsyncLocalStorage();
+let runEnv;
 let cachedUserDefault;
 
-const ensureEnv = (rawEnv) => {
-  if (!cachedEnv) {
-    const cap = rawEnv.__BTCF_CAPABILITY;
-    Object.defineProperty(globalThis, "caches", {
-      configurable: true,
-      value: createRunCacheStorage((op) => cap.invoke("cache", op)),
-    });
-    const env = { ...SPEC.vars, ...(rawEnv.__BTCF_RUNTIME_VARS ?? {}) };
-    for (const [bindingName, desc] of Object.entries(SPEC.bindings)) {
-      if (desc.kind === "d1") env[bindingName] = createRunD1Binding((op) => cap.invoke("d1:" + desc.sup, op));
-      else if (desc.kind === "kv") env[bindingName] = createRunKVBinding((op) => cap.invoke("kv:" + desc.sup, op));
-      else if (desc.kind === "r2") env[bindingName] = createRunR2Binding((op) => cap.invoke("r2:" + desc.sup, op));
-      else if (desc.kind === "queue") env[bindingName] = createRunQueueBinding((op) => cap.invoke("queue:" + desc.sup, op));
-      else if (desc.kind === "do") {
-        const doFetcher = rawEnv["__BTCF_DO_FETCH_" + bindingName];
-        env[bindingName] = createRunDurableObjectNamespace(
-          (op) => cap.invoke("do:" + desc.sup, op),
-          doFetcher
-            ? (target, req) => {
-                const headers = new Headers(req.headers);
-                headers.set("x-btcf-do-target", JSON.stringify(target));
-                return doFetcher.fetch(new Request(req, { headers }));
-              }
-            : undefined,
-        );
-      }
-      else if (desc.kind === "ratelimit") env[bindingName] = createRunRateLimitBinding((op) => cap.invoke("ratelimit:" + desc.sup, op));
-      else if (desc.kind === "service") env[bindingName] = rawEnv["__BTCF_SVC_" + bindingName];
-      else if (desc.kind === "send_email") env[bindingName] = { send: (msg) => cap.invoke("email:" + desc.sup, msg) };
-      else if (desc.kind === "analytics_engine") {
-        env[bindingName] = { writeDataPoint: (event) => { void cap.invoke("ae:" + desc.sup, event).catch(() => {}); } };
-      } else if (desc.kind === "native") {
-        env[bindingName] = rawEnv[desc.sup];
-      }
-    }
-    cachedEnv = env;
-  }
-  return cachedEnv;
+// The current run's caches, wherever its code reaches them from.
+Object.defineProperty(globalThis, "caches", {
+  configurable: true,
+  value: createRunCacheStorage((op) => {
+    const run = runAls.getStore();
+    if (!run) throw new Error("Cache used outside a fenced run");
+    return run.cap.invoke(run.runId, "cache", op);
+  }),
+});
+
+// process.env holds the Worker's own vars, filled as the isolate started; the current run's are
+// over them.
+if (typeof process !== "undefined" && process.env) {
+  const runVar = (key) => {
+    const vars = runAls.getStore()?.vars;
+    return vars && typeof key === "string" && typeof vars[key] === "string" ? vars[key] : undefined;
+  };
+  const view = new Proxy(process.env, {
+    get: (target, key) => runVar(key) ?? Reflect.get(target, key),
+    has: (target, key) => runVar(key) !== undefined || Reflect.has(target, key),
+    ownKeys: (target) => {
+      const vars = runAls.getStore()?.vars ?? {};
+      return [...new Set([...Reflect.ownKeys(target), ...Object.keys(vars).filter((key) => typeof vars[key] === "string")])];
+    },
+    getOwnPropertyDescriptor: (target, key) => {
+      const value = runVar(key);
+      return value === undefined
+        ? Reflect.getOwnPropertyDescriptor(target, key)
+        : { configurable: true, enumerable: true, value, writable: true };
+    },
+  });
+  Object.defineProperty(process, "env", { configurable: true, value: view, writable: true });
+}
+
+// A request for another Worker of the slot, as this run's.
+const asRun = (runId, input, init) => {
+  const request = input instanceof Request && init === undefined ? input : new Request(input, init);
+  const headers = new Headers(request.headers);
+  headers.set(RUN_HEADER, runId);
+  return new Request(request, { headers });
 };
 
-const getUserDefault = async (rawEnv) => {
-  ensureEnv(rawEnv);
+// The run's code reaching its own Durable Objects through ctx.exports gets the run's namespaces
+// (EXPORTED_DO_BINDINGS names the env binding for each class).
+const fenceCtx = (ctx, env) => {
+  const raw = ctx.exports ?? {};
+  const exports = new Proxy(raw, {
+    get: (target, name) => (EXPORTED_DO_BINDINGS[name] ? env[EXPORTED_DO_BINDINGS[name]] : Reflect.get(target, name)),
+  });
+  Object.defineProperty(ctx, "exports", { configurable: true, value: exports });
+  return ctx;
+};
+
+const buildEnv = (rawEnv, runId, vars) => {
+  const cap = rawEnv.__BTCF_CAPABILITY;
+  const invoke = (name, op) => cap.invoke(runId, name, op);
+  const env = { ...SPEC.vars, ...(vars ?? {}) };
+  for (const [bindingName, desc] of Object.entries(SPEC.bindings)) {
+    if (desc.kind === "d1") env[bindingName] = createRunD1Binding((op) => invoke("d1:" + desc.sup, op));
+    else if (desc.kind === "kv") env[bindingName] = createRunKVBinding((op) => invoke("kv:" + desc.sup, op));
+    else if (desc.kind === "r2") env[bindingName] = createRunR2Binding((op) => invoke("r2:" + desc.sup, op));
+    else if (desc.kind === "queue") env[bindingName] = createRunQueueBinding((op) => invoke("queue:" + desc.sup, op));
+    else if (desc.kind === "do") {
+      const doFetcher = rawEnv["__BTCF_DO_FETCH_" + bindingName];
+      env[bindingName] = createRunDurableObjectNamespace(
+        (op) => invoke("do:" + desc.sup, op),
+        doFetcher
+          ? (target, req) => {
+              const request = asRun(runId, req);
+              request.headers.set("x-btcf-do-target", JSON.stringify(target));
+              return doFetcher.fetch(request);
+            }
+          : undefined,
+      );
+    }
+    else if (desc.kind === "ratelimit") env[bindingName] = createRunRateLimitBinding((op) => invoke("ratelimit:" + desc.sup, op));
+    else if (desc.kind === "workflow") env[bindingName] = createRunWorkflowBinding((op) => invoke("workflow:" + desc.sup, op));
+    else if (desc.kind === "service") {
+      const service = rawEnv["__BTCF_SVC_" + bindingName];
+      env[bindingName] = { fetch: (input, init) => service.fetch(asRun(runId, input, init)) };
+    } else if (desc.kind === "send_email") env[bindingName] = { send: (msg) => invoke("email:" + desc.sup, msg) };
+    else if (desc.kind === "analytics_engine") {
+      env[bindingName] = { writeDataPoint: (event) => { void invoke("ae:" + desc.sup, event).catch(() => {}); } };
+    } else if (desc.kind === "native") {
+      env[bindingName] = rawEnv[desc.sup];
+    }
+  }
+  return env;
+};
+
+// The run a call is for, with its env (built once for the run) and vars.
+const enterRun = async (rawEnv, ctx) => {
+  const runId = ctx.props?.runId;
+  if (!runId) throw new Error("Missing run for fenced Worker ${spec.name}");
+  if (runEnv?.runId !== runId) {
+    const cap = rawEnv.__BTCF_CAPABILITY;
+    const vars = (await cap.vars(runId, ${JSON.stringify(spec.name)})) ?? {};
+    runEnv = { runId, cap, vars, env: buildEnv(rawEnv, runId, vars) };
+  }
+  return runEnv;
+};
+
+const getUserDefault = async () => {
   if (!cachedUserDefault) {
     const mod = await import(${JSON.stringify(`./${spec.mainModule}`)});
     cachedUserDefault = mod.default;
@@ -514,51 +711,56 @@ const getUserDefault = async (rawEnv) => {
   return cachedUserDefault;
 };
 
+const asRunCall = async (rawEnv, ctx, call) => {
+  const run = await enterRun(rawEnv, ctx);
+  return runAls.run(run, async () => call(run.env, await getUserDefault()));
+};
+
 export default class BtcfDynamicEntry extends WorkerEntrypoint {
   async fetch(request) {
-    const env = ensureEnv(this.env);
-    const worker = await getUserDefault(this.env);
-    if (typeof worker === "function") return new worker(this.ctx, env).fetch(request);
-    return worker.fetch(request, env, this.ctx);
+    return asRunCall(this.env, this.ctx, (env, worker) => {
+      if (typeof worker === "function") return new worker(fenceCtx(this.ctx, env), env).fetch(request);
+      return worker.fetch(request, env, fenceCtx(this.ctx, env));
+    });
   }
 
   async __btcf_queue(payload) {
-    const env = ensureEnv(this.env);
-    const worker = await getUserDefault(this.env);
-    const acked = new Set();
-    const retried = new Map();
-    const messages = payload.messages.map((m) => ({
-      id: m.id,
-      timestamp: new Date(m.timestamp),
-      attempts: m.attempts,
-      body: m.body,
-      ack() { acked.add(m.id); retried.delete(m.id); },
-      retry(options) { retried.set(m.id, options ?? null); acked.delete(m.id); },
-    }));
-    const batch = {
-      queue: payload.queue,
-      metadata: payload.metadata,
-      messages,
-      ackAll() { for (const m of messages) m.ack(); },
-      retryAll(options) { for (const m of messages) m.retry(options); },
-    };
-    if (typeof worker === "function") {
-      await new worker(this.ctx, env).queue(batch);
-    } else if (typeof worker.queue === "function") {
-      await worker.queue(batch, env, this.ctx);
-    }
-    return { acked: [...acked], retried: [...retried.entries()] };
+    return asRunCall(this.env, this.ctx, async (env, worker) => {
+      const acked = new Set();
+      const retried = new Map();
+      const messages = payload.messages.map((m) => ({
+        id: m.id,
+        timestamp: new Date(m.timestamp),
+        attempts: m.attempts,
+        body: m.body,
+        ack() { acked.add(m.id); retried.delete(m.id); },
+        retry(options) { retried.set(m.id, options ?? null); acked.delete(m.id); },
+      }));
+      const batch = {
+        queue: payload.queue,
+        metadata: payload.metadata,
+        messages,
+        ackAll() { for (const m of messages) m.ack(); },
+        retryAll(options) { for (const m of messages) m.retry(options); },
+      };
+      if (typeof worker === "function") {
+        await new worker(fenceCtx(this.ctx, env), env).queue(batch);
+      } else if (typeof worker.queue === "function") {
+        await worker.queue(batch, env, fenceCtx(this.ctx, env));
+      }
+      return { acked: [...acked], retried: [...retried.entries()] };
+    });
   }
 
   async __btcf_scheduled(controller) {
-    const env = ensureEnv(this.env);
-    const worker = await getUserDefault(this.env);
-    const ctrl = { cron: controller.cron, scheduledTime: controller.scheduledTime, noRetry() {} };
-    if (typeof worker === "function") {
-      await new worker(this.ctx, env).scheduled(ctrl);
-    } else if (typeof worker.scheduled === "function") {
-      await worker.scheduled(ctrl, env, this.ctx);
-    }
+    return asRunCall(this.env, this.ctx, async (env, worker) => {
+      const ctrl = { cron: controller.cron, scheduledTime: controller.scheduledTime, noRetry() {} };
+      if (typeof worker === "function") {
+        await new worker(fenceCtx(this.ctx, env), env).scheduled(ctrl);
+      } else if (typeof worker.scheduled === "function") {
+        await worker.scheduled(ctrl, env, fenceCtx(this.ctx, env));
+      }
+    });
   }
 }
 `;
@@ -595,6 +797,12 @@ export const createFencedWorkerSlots = (
   const emailByKey = new Map<string, { sup: string; config: Record<string, any> }>();
   const aeByDataset = new Map<string, { sup: string; config: Record<string, any> }>();
   const hyperdriveById = new Map<string, { sup: string; config: Record<string, any> }>();
+  const vectorizeByIndex = new Map<string, { sup: string; config: Record<string, any> }>();
+  // Each Workflow, by the Worker whose class runs it: every slot has a copy of its own.
+  const workflowByName = new Map<
+    string,
+    { sup: string; config: Record<string, any>; ownerWorker: string; className: string }
+  >();
 
   let usesImages = false;
   let usesBrowser = false;
@@ -676,6 +884,20 @@ export const createFencedWorkerSlots = (
       const entry = getOrAdd(aeByDataset, ae.dataset ?? ae.binding, (i) => ({ sup: `AE_${i}`, config: ae }));
       bindings[ae.binding] = { kind: "analytics_engine", sup: entry.sup };
     }
+    for (const wf of config.workflows ?? []) {
+      const ownerWorker = typeof wf.script_name === "string" ? wf.script_name : worker.name;
+      const entry = getOrAdd(workflowByName, wf.name, (i) => ({
+        sup: `WF_${i}`,
+        config: wf,
+        ownerWorker,
+        className: wf.class_name,
+      }));
+      bindings[wf.binding] = { kind: "workflow", sup: entry.sup };
+    }
+    for (const vec of config.vectorize ?? []) {
+      const entry = getOrAdd(vectorizeByIndex, vec.index_name, (i) => ({ sup: `VEC_${i}`, config: vec }));
+      bindings[vec.binding] = { kind: "native", sup: entry.sup };
+    }
     for (const hd of config.hyperdrive ?? []) {
       const entry = getOrAdd(hyperdriveById, hd.id, (i) => ({ sup: `HD_${i}`, config: hd }));
       bindings[hd.binding] = { kind: "native", sup: entry.sup };
@@ -722,14 +944,28 @@ export const createFencedWorkerSlots = (
     workerModulesInfo.push({ name: worker.name, modules: linkedModules });
   }
 
-  // Generate shared manifest.js for the Supervisor Workers
+  // manifest.js describes each Worker for the supervisors; modules.js holds their code, for the
+  // module store alone, so a runtime has one copy of it however many slots it has.
   const importLines: string[] = [];
   const workerBuilderLines: string[] = [];
+  const moduleLines: string[] = [];
   let importCounter = 0;
 
   for (const [index, info] of workerModulesInfo.entries()) {
     const spec = workerSpecs[index]!;
-    const entrySource = createDynamicWorkerEntrySource(spec);
+    const entrySource = createDynamicWorkerEntrySource(
+      spec,
+      Object.fromEntries(
+        Object.entries(spec.bindings)
+          .filter(([, desc]) => desc.kind === "do")
+          .flatMap(([bindingName, desc]) => {
+            const entry = Array.from(doByTarget.values()).find(
+              (candidate) => candidate.sup === (desc as { sup: string }).sup,
+            );
+            return entry && entry.ownerWorker === info.name ? [[entry.className, bindingName]] : [];
+          }),
+      ),
+    );
     const moduleEntries: string[] = [
       `"__btcf_entry.js": ${JSON.stringify(entrySource)}`,
       ...Object.entries(runtimeModules).map(
@@ -745,19 +981,43 @@ export const createFencedWorkerSlots = (
       else if (mod.kind === "cjs") moduleEntries.push(`${JSON.stringify(mod.relPath)}: { cjs: ${varName} }`);
       else moduleEntries.push(`${JSON.stringify(mod.relPath)}: ${varName}`);
     }
-    const statelessWasm =
-      Object.keys(spec.bindings).length === 0 &&
-      Object.keys(spec.vars).length === 0 &&
-      info.modules.some((mod) => mod.kind === "wasm");
-    workerBuilderLines.push(
-      `  ${JSON.stringify(info.name)}: { spec: ${JSON.stringify(spec)}, statelessWasm: ${JSON.stringify(statelessWasm)}, modules: { ${moduleEntries.join(", ")} } }`,
-    );
+    workerBuilderLines.push(`  ${JSON.stringify(info.name)}: { spec: ${JSON.stringify(spec)} }`);
+    moduleLines.push(`  ${JSON.stringify(info.name)}: { ${moduleEntries.join(", ")} }`);
   }
 
-  const manifestPath = path.join(cleanupDir, "manifest.js");
   writeFileSync(
-    manifestPath,
-    `${importLines.join("\n")}\nexport const WORKERS = {\n${workerBuilderLines.join(",\n")}\n};\n`,
+    path.join(cleanupDir, "manifest.js"),
+    `export const WORKERS = {\n${workerBuilderLines.join(",\n")}\n};\n`,
+  );
+  writeFileSync(
+    path.join(cleanupDir, "modules.js"),
+    `${importLines.join("\n")}\nexport const MODULES = {\n${moduleLines.join(",\n")}\n};\n`,
+  );
+  writeFileSync(
+    path.join(cleanupDir, "module-store.js"),
+    `import { WorkerEntrypoint } from "cloudflare:workers";
+import { MODULES } from "./modules.js";
+
+// Hands a supervisor a Worker's modules as it loads the Worker for a run, in pieces: an RPC value
+// is at most 32 MiB, and a Worker's code, or a Wasm module alone, can be more.
+const contentOf = (module) => (typeof module === "string" ? module : Object.values(module)[0]);
+const kindOf = (module) => (typeof module === "string" ? undefined : Object.keys(module)[0]);
+const sizeOf = (content) => (typeof content === "string" ? content.length : content.byteLength);
+
+export default class ModuleStore extends WorkerEntrypoint {
+  describe(workerName) {
+    return Object.entries(MODULES[workerName]).map(([name, module]) => ({
+      name,
+      kind: kindOf(module),
+      size: sizeOf(contentOf(module)),
+    }));
+  }
+
+  piece(workerName, name, start, end) {
+    return contentOf(MODULES[workerName][name]).slice(start, end);
+  }
+}
+`,
   );
 
   // Build Supervisor Worker source
@@ -784,10 +1044,12 @@ import {
   executeRunQueueOperation,
   executeRunR2Operation,
   executeRunRateLimitOperation,
+  executeRunWorkflowOperation,
   loadRunWorker,
   RunBindingCapability,
   RunBindingProxy,
   runEnded,
+  terminateRunWorkflows,
 } from "./runtime/WorkerdRun.js";
 
 export { RunBindingCapability };
@@ -798,45 +1060,80 @@ const D1_BINDINGS = ${JSON.stringify(d1Bindings)};
 const KV_BINDINGS = ${JSON.stringify(kvBindings)};
 const R2_BINDINGS = ${JSON.stringify(r2Bindings)};
 const DO_BINDINGS = ${JSON.stringify(doBindings)};
+const WORKFLOW_BINDINGS = ${JSON.stringify(Array.from(workflowByName.values()).map((entry) => entry.sup))};
 
+// A Worker's modules, read from the runtime's module store piece by piece (at most 16 MiB each).
+const MODULE_PIECE = 16 * 1024 * 1024;
+const readModules = async (store, workerName) => {
+  const modules = {};
+  for (const { name, kind, size } of await store.describe(workerName)) {
+    const pieces = [];
+    for (let start = 0; start < Math.max(size, 1); start += MODULE_PIECE)
+      pieces.push(await store.piece(workerName, name, start, Math.min(size, start + MODULE_PIECE)));
+    let content;
+    if (typeof pieces[0] === "string") content = pieces.join("");
+    else {
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const piece of pieces) {
+        bytes.set(new Uint8Array(piece), offset);
+        offset += piece.byteLength;
+      }
+      content = bytes.buffer;
+    }
+    modules[name] = kind === undefined ? content : { [kind]: content };
+  }
+  return modules;
+};
+
+// A Worker's isolate in this slot, which serves the slot's runs one after another: its env holds
+// only what every run shares, and each call names its run (the entry's ctx.props). The loader keeps
+// each Worker it loads by name, so one per slot and Worker, rather than one per run, keeps the
+// runtime from growing with every run.
 const loadDynamicWorker = async (env, ctx, runId, workerName) => {
   const entry = WORKERS[workerName];
   if (!entry) throw new Error("Unknown fenced worker: " + workerName);
-  const proxy = env.SLOT_PROXY.getByName("slot");
-  const runtimeVars = await proxy.getRuntimeVars(workerName);
-  const capability = ctx.exports.RunBindingCapability({ props: { runId, proxy } });
-  const loaderEnv = {
-    ...entry.spec.vars,
-    ...(runtimeVars ?? {}),
-    __BTCF_CAPABILITY: capability,
-    ...(runtimeVars ? { __BTCF_RUNTIME_VARS: runtimeVars } : {}),
-  };
-  for (const [bindingName, desc] of Object.entries(entry.spec.bindings)) {
-    if (desc.kind === "service") {
-      loaderEnv["__BTCF_SVC_" + bindingName] = ctx.exports.RunServiceFetcher({
-        props: { runId, targetWorker: desc.target },
-      });
-    } else if (desc.kind === "do") {
-      loaderEnv["__BTCF_DO_FETCH_" + bindingName] = ctx.exports.RunDoFetcher({
-        props: { runId, supBinding: desc.sup },
-      });
-    } else if (desc.kind === "native") {
-      loaderEnv[desc.sup] = env[desc.sup];
+  const worker = loadRunWorker(env.LOADER, "slot", workerName, async () => {
+    const proxy = env.SLOT_PROXY.getByName("slot");
+    const loaderEnv = {
+      ...entry.spec.vars,
+      __BTCF_CAPABILITY: ctx.exports.RunBindingCapability({ props: { proxy } }),
+    };
+    for (const [bindingName, desc] of Object.entries(entry.spec.bindings)) {
+      if (desc.kind === "service") {
+        loaderEnv["__BTCF_SVC_" + bindingName] = ctx.exports.RunServiceFetcher({ props: { targetWorker: desc.target } });
+      } else if (desc.kind === "do") {
+        loaderEnv["__BTCF_DO_FETCH_" + bindingName] = ctx.exports.RunDoFetcher({ props: { supBinding: desc.sup } });
+      } else if (desc.kind === "native") {
+        loaderEnv[desc.sup] = env[desc.sup];
+      }
     }
-  }
-  const reuseStatelessWasm = entry.statelessWasm && (!runtimeVars || Object.keys(runtimeVars).length === 0);
-  return loadRunWorker(env.LOADER, reuseStatelessWasm ? "stateless-wasm" : runId, workerName, () => ({
-    compatibilityDate: entry.spec.compatibilityDate,
-    compatibilityFlags: entry.spec.compatibilityFlags,
-    mainModule: "__btcf_entry.js",
-    modules: entry.modules,
-    env: loaderEnv,
-  }));
+    return {
+      compatibilityDate: entry.spec.compatibilityDate,
+      // The entry follows each call's run with AsyncLocalStorage, which nodejs_als alone gives.
+      compatibilityFlags: entry.spec.compatibilityFlags.some((flag) => flag === "nodejs_compat" || flag === "nodejs_als")
+        ? entry.spec.compatibilityFlags
+        : [...entry.spec.compatibilityFlags, "nodejs_als"],
+      mainModule: "__btcf_entry.js",
+      modules: await readModules(env.__BTCF_MODULE_STORE, workerName),
+      env: loaderEnv,
+    };
+  });
+  return { getEntrypoint: () => worker.getEntrypoint(undefined, { props: { runId } }) };
+};
+
+// The run a request between the slot's Workers is for, which the calling Worker's entry names.
+const takeRunHeader = (request) => {
+  const runId = request.headers.get("x-btcf-run");
+  const headers = new Headers(request.headers);
+  headers.delete("x-btcf-run");
+  return { runId, request: new Request(request, { headers }) };
 };
 
 export class RunServiceFetcher extends WorkerEntrypoint {
-  async fetch(request) {
-    const { runId, targetWorker } = this.ctx.props;
+  async fetch(incoming) {
+    const { targetWorker } = this.ctx.props;
+    const { runId, request } = takeRunHeader(incoming);
     const proxy = this.env.SLOT_PROXY.getByName("slot");
     if (!(await proxy.isActive(runId))) throw new Error(runEnded);
     const worker = await loadDynamicWorker(this.env, this.ctx, runId, targetWorker);
@@ -845,8 +1142,9 @@ export class RunServiceFetcher extends WorkerEntrypoint {
 }
 
 export class RunDoFetcher extends WorkerEntrypoint {
-  async fetch(request) {
-    const { runId, supBinding } = this.ctx.props;
+  async fetch(incoming) {
+    const { supBinding } = this.ctx.props;
+    const { runId, request } = takeRunHeader(incoming);
     const proxy = this.env.SLOT_PROXY.getByName("slot");
     if (!(await proxy.isActive(runId))) return new Response(runEnded, { status: 410 });
     const rawTarget = request.headers.get("x-btcf-do-target");
@@ -866,15 +1164,42 @@ export class RunDoFetcher extends WorkerEntrypoint {
 export class SlotBindingProxy extends RunBindingProxy {
   #cachedUrls = new Map();
   #touchedDos = new Map();
+  #createdWorkflows = new Map();
   #runtimeVarsByWorker = {};
+  #consumeQueues = true;
 
-  async activateWithVars(runId, runtimeVarsByWorker) {
+  async activateWithVars(runId, runtimeVarsByWorker, settings) {
     await this.activate(runId);
+    this.#settle(runtimeVarsByWorker, settings);
+  }
+
+  // A run's own vars and settings, given when it takes its slot: an in-process slot is activated
+  // ahead of the run that takes it, which may be any of its harness's variants.
+  configure(runId, runtimeVarsByWorker, settings) {
+    if (!this.isActive(runId)) throw new Error(runEnded);
+    this.#settle(runtimeVarsByWorker, settings);
+  }
+
+  #settle(runtimeVarsByWorker, settings) {
     this.#runtimeVarsByWorker = runtimeVarsByWorker ?? {};
+    this.#consumeQueues = settings?.consumeQueues ?? true;
+  }
+
+  /** Whether the run's queue messages go to their consumer, the Worker named. */
+  consumesQueues(runId, workerName) {
+    if (!this.isActive(runId)) return false;
+    const consume = this.#consumeQueues;
+    return typeof consume === "boolean" ? consume : (consume[workerName] ?? true);
   }
 
   getRuntimeVars(workerName) {
     return this.#runtimeVarsByWorker[workerName];
+  }
+
+  recordCreatedWorkflow(bindingName, scopedId) {
+    let ids = this.#createdWorkflows.get(bindingName);
+    if (!ids) this.#createdWorkflows.set(bindingName, (ids = new Set()));
+    ids.add(scopedId);
   }
 
   recordTouchedDo(bindingName, hex) {
@@ -892,6 +1217,10 @@ export class SlotBindingProxy extends RunBindingProxy {
       ...R2_BINDINGS.map((name) => clearR2Bucket(this.env[name])),
       clearRunCaches(caches, retiredRunId, this.#cachedUrls),
       clearRunDurableObjects(doMap, this.#touchedDos),
+      terminateRunWorkflows(
+        Object.fromEntries(WORKFLOW_BINDINGS.map((name) => [name, this.env[name]])),
+        this.#createdWorkflows,
+      ),
     ]);
   }
 
@@ -919,6 +1248,11 @@ export class SlotBindingProxy extends RunBindingProxy {
       });
     }
     if (kind === "ratelimit") return executeRunRateLimitOperation(this.env[target], runId, op);
+    if (kind === "workflow") {
+      return executeRunWorkflowOperation(this.env[target], runId, op, (scopedId) =>
+        this.recordCreatedWorkflow(target, scopedId),
+      );
+    }
     if (kind === "email") return this.env[target].send(op);
     if (kind === "ae") return this.env[target].writeDataPoint(op);
     if (kind === "service") {
@@ -938,8 +1272,13 @@ export default {
     const proxy = env.SLOT_PROXY.getByName("slot");
 
     if (url.pathname === "/__btcf/activate") {
-      const { runId, runtimeVarsByWorker } = await request.json();
-      await proxy.activateWithVars(runId, runtimeVarsByWorker);
+      const { runId, runtimeVarsByWorker, settings } = await request.json();
+      await proxy.activateWithVars(runId, runtimeVarsByWorker, settings);
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/__btcf/configure") {
+      const { runId, runtimeVarsByWorker, settings } = await request.json();
+      await proxy.configure(runId, runtimeVarsByWorker, settings);
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/__btcf/retire") {
@@ -1005,6 +1344,11 @@ export default {
     cleanHeaders.delete(${JSON.stringify(BTCF_SECRET_HEADER)});
     cleanHeaders.delete(${JSON.stringify(BTCF_RUN_ID_HEADER)});
     cleanHeaders.delete(${JSON.stringify(BTCF_WORKER_HEADER)});
+    const origin = cleanHeaders.get(${JSON.stringify(BTCF_ORIGIN_HEADER)});
+    if (origin !== null) {
+      cleanHeaders.delete(${JSON.stringify(BTCF_ORIGIN_HEADER)});
+      cleanHeaders.set("Origin", origin);
+    }
     const cleanRequest = new Request(request, { headers: cleanHeaders });
     const worker = await loadDynamicWorker(env, ctx, runId, workerName);
     const response = await worker.getEntrypoint().fetch(cleanRequest);
@@ -1029,6 +1373,11 @@ export default {
       batch,
       (runId) => proxy.isActive(runId),
       async (runId, scopedBatch) => {
+        // A run that doesn't consume its queues has no consumer: its messages go nowhere.
+        if (!(await proxy.consumesQueues(runId, target.workerName))) {
+          for (const message of scopedBatch.messages) message.ack();
+          return;
+        }
         const worker = await loadDynamicWorker(env, ctx, runId, target.workerName);
         const outcome = await worker.getEntrypoint().__btcf_queue({
           queue: target.originalQueue,
@@ -1059,20 +1408,35 @@ export default {
 
   const ownedDoClasses = collectOwnedDoClasses(workers);
   const doHostWrappers = new Map<string, { wrapperPath: string; runtimeFiles: string[] }>();
+  const ownedWorkflowClasses = new Map<string, string[]>();
+  for (const entry of workflowByName.values()) {
+    ownedWorkflowClasses.set(entry.ownerWorker, [
+      ...(ownedWorkflowClasses.get(entry.ownerWorker) ?? []),
+      entry.className,
+    ]);
+  }
   for (const [workerIndex, worker] of workers.entries()) {
-    const classes = ownedDoClasses.get(worker.name);
-    if (!classes || classes.size === 0) continue;
+    const classes = ownedDoClasses.get(worker.name) ?? new Set<string>();
+    const workflowClasses = [...new Set(ownedWorkflowClasses.get(worker.name) ?? [])];
+    if (classes.size === 0 && workflowClasses.length === 0) continue;
     const config = getInlineConfig(worker.input);
     const baseDir = config.base_dir ?? path.dirname(config.main);
     doHostWrappers.set(
       worker.name,
       writeDoHostWrapper({
         baseDir,
-        classes: Array.from(classes),
+        classes: Array.from(classes).filter((className) => !workflowClasses.includes(className)),
         main: config.main,
         secret,
+        slotCount,
         spec: workerSpecs[workerIndex]!,
         workerName: worker.name,
+        workflowClasses,
+        exportedDoBindings: Object.fromEntries(
+          Array.from(doByTarget.values())
+            .filter((entry) => entry.ownerWorker === worker.name)
+            .map((entry) => [entry.className, entry.sup]),
+        ),
       }),
     );
   }
@@ -1114,18 +1478,15 @@ export default {
       vars: {
         __BTCF_QUEUE_CONSUMERS: JSON.stringify(slotQueueConsumers),
       },
-      rules: [
-        { type: "ESModule", globs: ["supervisor.js", "manifest.js", "runtime/**/*.js"], fallthrough: true },
-        { type: "Text", globs: ["**/*.btcf-text"], fallthrough: false },
-        { type: "Data", globs: ["**/*.btcf-bin"], fallthrough: false },
-      ],
+      rules: [{ type: "ESModule", globs: ["supervisor.js", "manifest.js", "runtime/**/*.js"], fallthrough: false }],
+      services: [{ binding: "__BTCF_MODULE_STORE", service: MODULE_STORE_NAME }],
       durable_objects: {
         bindings: [
           { name: "SLOT_PROXY", class_name: "SlotBindingProxy" },
           ...Array.from(doByTarget.values()).map((entry) => ({
             name: entry.sup,
-            class_name: entry.className,
-            script_name: getDoHostName(entry.ownerWorker, slot),
+            class_name: getSlotClassName(entry.className, slot),
+            script_name: getDoHostName(entry.ownerWorker),
           })),
         ],
       },
@@ -1218,6 +1579,22 @@ export default {
             })),
           }
         : {}),
+      ...(vectorizeByIndex.size > 0
+        ? {
+            vectorize: Array.from(vectorizeByIndex.values()).map((entry) => ({ ...entry.config, binding: entry.sup })),
+          }
+        : {}),
+      // The slot's copy of each Workflow, defined by the host Worker that runs its class.
+      ...(workflowByName.size > 0
+        ? {
+            workflows: Array.from(workflowByName.values()).map((entry) => ({
+              binding: entry.sup,
+              name: appendSlot(entry.config.name, slot),
+              class_name: getSlotClassName(entry.className, slot),
+              script_name: getDoHostName(entry.ownerWorker),
+            })),
+          }
+        : {}),
       ...(usesImages ? { images: { binding: "SHARED_IMAGES" } } : {}),
       ...(usesBrowser ? { browser: { binding: "SHARED_BROWSER" } } : {}),
       ...(usesVersionMetadata ? { version_metadata: { binding: "SHARED_VERSION_METADATA" } } : {}),
@@ -1225,73 +1602,137 @@ export default {
     };
 
     inputs.push({ config: supervisorConfig } as InlineWorkerInput);
-
-    // Emit native DO Host Workers for this slot
-    for (const worker of workers) {
-      const hostInfo = doHostWrappers.get(worker.name);
-      if (!hostInfo) continue;
-      const origConfig = getInlineConfig(worker.input);
-      const doHostName = getDoHostName(worker.name, slot);
-      const flags = new Set<string>(
-        Array.isArray(origConfig.compatibility_flags) ? origConfig.compatibility_flags : [],
-      );
-      flags.add("nodejs_compat");
-
-      const workerSpec = workerSpecs[workers.indexOf(worker)]!;
-      const doHostConfig: Record<string, any> = {
-        name: doHostName,
-        main: hostInfo.wrapperPath,
-        base_dir: origConfig.base_dir ?? path.dirname(origConfig.main),
-        no_bundle: true,
-        find_additional_modules: true,
-        compatibility_date: origConfig.compatibility_date ?? maxCompatibilityDate,
-        compatibility_flags: Array.from(flags),
-        ...(Object.keys(workerSpec.vars).length > 0 ? { vars: workerSpec.vars } : {}),
-        rules: [
-          {
-            type: "ESModule",
-            globs: [path.basename(origConfig.main), path.basename(hostInfo.wrapperPath), ...hostInfo.runtimeFiles],
-            fallthrough: true,
-          },
-          ...(origConfig.rules ?? []),
-        ],
-        durable_objects: {
-          bindings: [{ name: "__BTCF_SLOT_PROXY", class_name: "SlotBindingProxy", script_name: supervisorName }],
-        },
-        ...(origConfig.migrations
-          ? {
-              migrations: origConfig.migrations.map((migration: Record<string, any>) => ({
-                ...migration,
-                ...(migration.transferred_classes
-                  ? {
-                      transferred_classes: migration.transferred_classes.map((transfer: Record<string, any>) => ({
-                        ...transfer,
-                        ...(typeof transfer.from_script === "string" && doHostWrappers.has(transfer.from_script)
-                          ? { from_script: getDoHostName(transfer.from_script, slot) }
-                          : {}),
-                      })),
-                    }
-                  : {}),
-              })),
-            }
-          : {}),
-        ...(origConfig.images?.binding ? { images: { binding: "SHARED_IMAGES" } } : {}),
-        ...(origConfig.browser?.binding ? { browser: { binding: "SHARED_BROWSER" } } : {}),
-        ...(origConfig.version_metadata?.binding ? { version_metadata: { binding: "SHARED_VERSION_METADATA" } } : {}),
-        ...(origConfig.assets?.binding ? { assets: { ...origConfig.assets, binding: "SHARED_ASSETS" } } : {}),
-        ...(origConfig.hyperdrive?.length
-          ? {
-              hyperdrive: origConfig.hyperdrive.map((hd: Record<string, any>) => ({
-                ...hd,
-                binding: hyperdriveById.get(hd.id)!.sup,
-              })),
-            }
-          : {}),
-      };
-
-      inputs.push({ config: doHostConfig } as InlineWorkerInput);
-    }
   }
+
+  // A migration of the Worker's classes, as one of each slot's copy of them.
+  const slotMigration = (migration: Record<string, any>) => {
+    const perSlot = (classes: string[] | undefined) =>
+      classes?.flatMap((className) =>
+        Array.from({ length: slotCount }, (_, slot) => getSlotClassName(className, slot)),
+      );
+    const slotEach = <T>(entries: T[] | undefined, map: (entry: T, slot: number) => T) =>
+      entries?.flatMap((entry) => Array.from({ length: slotCount }, (_, slot) => map(entry, slot)));
+    return {
+      ...migration,
+      ...(migration.new_classes ? { new_classes: perSlot(migration.new_classes) } : {}),
+      ...(migration.new_sqlite_classes ? { new_sqlite_classes: perSlot(migration.new_sqlite_classes) } : {}),
+      ...(migration.deleted_classes ? { deleted_classes: perSlot(migration.deleted_classes) } : {}),
+      ...(migration.renamed_classes
+        ? {
+            renamed_classes: slotEach(migration.renamed_classes, (rename: { from: string; to: string }, slot) => ({
+              from: getSlotClassName(rename.from, slot),
+              to: getSlotClassName(rename.to, slot),
+            })),
+          }
+        : {}),
+      ...(migration.transferred_classes
+        ? {
+            transferred_classes: slotEach(migration.transferred_classes, (transfer: Record<string, any>, slot) => ({
+              ...transfer,
+              from: getSlotClassName(transfer.from, slot),
+              to: getSlotClassName(transfer.to, slot),
+              ...(typeof transfer.from_script === "string" && doHostWrappers.has(transfer.from_script)
+                ? { from_script: getDoHostName(transfer.from_script) }
+                : {}),
+            })),
+          }
+        : {}),
+    };
+  };
+
+  // One host per Worker with Durable Objects or Workflows, holding each slot's copy of its classes:
+  // its code compiles once in the runtime, however many slots there are.
+  for (const worker of workers) {
+    const hostInfo = doHostWrappers.get(worker.name);
+    if (!hostInfo) continue;
+    const origConfig = getInlineConfig(worker.input);
+    const doHostName = getDoHostName(worker.name);
+    const flags = new Set<string>(Array.isArray(origConfig.compatibility_flags) ? origConfig.compatibility_flags : []);
+    flags.add("nodejs_compat");
+
+    const workerSpec = workerSpecs[workers.indexOf(worker)]!;
+    const doHostConfig: Record<string, any> = {
+      name: doHostName,
+      main: hostInfo.wrapperPath,
+      base_dir: origConfig.base_dir ?? path.dirname(origConfig.main),
+      no_bundle: true,
+      find_additional_modules: true,
+      compatibility_date: origConfig.compatibility_date ?? maxCompatibilityDate,
+      compatibility_flags: Array.from(flags),
+      ...(Object.keys(workerSpec.vars).length > 0 ? { vars: workerSpec.vars } : {}),
+      rules: [
+        {
+          type: "ESModule",
+          globs: [path.basename(origConfig.main), path.basename(hostInfo.wrapperPath), ...hostInfo.runtimeFiles],
+          fallthrough: true,
+        },
+        ...(origConfig.rules ?? []),
+      ],
+      durable_objects: {
+        bindings: Array.from({ length: slotCount }, (_, slot) => ({
+          name: `__BTCF_SLOT_PROXY_${slot}`,
+          class_name: "SlotBindingProxy",
+          script_name: getSupervisorName(slot),
+        })),
+      },
+      // The Worker's migrations, for each slot's copy of its classes.
+      ...(origConfig.migrations ? { migrations: origConfig.migrations.map(slotMigration) } : {}),
+      ...(origConfig.images?.binding ? { images: { binding: "SHARED_IMAGES" } } : {}),
+      ...(origConfig.browser?.binding ? { browser: { binding: "SHARED_BROWSER" } } : {}),
+      ...(origConfig.version_metadata?.binding ? { version_metadata: { binding: "SHARED_VERSION_METADATA" } } : {}),
+      ...(origConfig.assets?.binding ? { assets: { ...origConfig.assets, binding: "SHARED_ASSETS" } } : {}),
+      ...(origConfig.hyperdrive?.length
+        ? {
+            hyperdrive: origConfig.hyperdrive.map((hd: Record<string, any>) => ({
+              ...hd,
+              binding: hyperdriveById.get(hd.id)!.sup,
+            })),
+          }
+        : {}),
+      ...(origConfig.vectorize?.length
+        ? {
+            vectorize: origConfig.vectorize.map((vec: Record<string, any>) => ({
+              ...vec,
+              binding: vectorizeByIndex.get(vec.index_name)!.sup,
+            })),
+          }
+        : {}),
+      // Each slot's copy of each Workflow whose class this Worker owns.
+      ...(Array.from(workflowByName.values()).some((entry) => entry.ownerWorker === worker.name)
+        ? {
+            workflows: Array.from({ length: slotCount }, (_, slot) =>
+              Array.from(workflowByName.values())
+                .filter((entry) => entry.ownerWorker === worker.name)
+                .map(({ config: { script_name: _owner, ...definition }, className, sup }) => ({
+                  ...definition,
+                  // The host doesn't use these bindings, but each needs a name of its own.
+                  binding: `${sup}_SLOT${slot}`,
+                  name: appendSlot(definition.name, slot),
+                  class_name: getSlotClassName(className, slot),
+                })),
+            ).flat(),
+          }
+        : {}),
+    };
+
+    inputs.push({ config: doHostConfig } as InlineWorkerInput);
+  }
+
+  inputs.push({
+    config: {
+      name: MODULE_STORE_NAME,
+      main: path.join(cleanupDir, "module-store.js"),
+      base_dir: cleanupDir,
+      no_bundle: true,
+      find_additional_modules: true,
+      compatibility_date: maxCompatibilityDate,
+      rules: [
+        { type: "ESModule", globs: ["module-store.js", "modules.js"], fallthrough: false },
+        { type: "Text", globs: ["**/*.btcf-text"], fallthrough: false },
+        { type: "Data", globs: ["**/*.btcf-bin"], fallthrough: false },
+      ],
+    },
+  } as InlineWorkerInput);
 
   return { cleanupDir, inputs, secret, slotSupervisorNames, workerSpecs };
 };

@@ -115,7 +115,7 @@ When a test times out, Bun kills every child process, including workerd and esbu
 
 ### Isolated Worker slots
 
-For harnesses that use supported storage, value, Images, internal service, and Durable Object bindings, `isolatedWorkerSlots` can amortize one workerd startup across multiple test runs while preserving Worker global and storage isolation:
+For harnesses that use supported storage, value, Images, internal service, and Durable Object bindings, `isolatedWorkerSlots` can amortize one workerd startup across multiple test runs while keeping each run's storage to itself:
 
 ```ts
 const harness = createCloudflareHarness({
@@ -125,7 +125,7 @@ const harness = createCloudflareHarness({
 });
 ```
 
-Eligible harnesses use four isolated slots by default. Each slot is a distinct Worker service with namespaced Cache API access and unique D1, KV, and R2 storage identities. A slot is leased once. After every slot in a workerd generation has been consumed, the harness rebuilds that generation in the background. Harnesses with unsupported bindings automatically use the single-slot reset path; explicitly requesting multiple slots with unsupported bindings throws.
+Eligible harnesses use four isolated slots by default. Each slot has namespaced Cache API access and unique D1, KV, R2, queue and Durable Object storage, which is reset after every run. A slot's Worker isolates serve its runs one after another, so module-level state in a Worker's code (a cache in a global, say) lasts from one run to the next in that slot, as it does from one request to the next in production; each run still gets its own bindings, vars and `process.env`. Harnesses with unsupported bindings automatically use the single-slot reset path; explicitly requesting multiple slots with unsupported bindings throws.
 
 `prewarmedWorkerdPoolSize` defaults to `1`, avoiding duplicate startup and memory costs. Set it to `2` or higher only when tests need concurrent harness leases; another ready pool member can then serve leases while a generation rebuilds.
 
@@ -149,11 +149,11 @@ test("uploads a PNG", async () => {
 });
 ```
 
-Runs in a lease never overlap. Each one waits for the background work it started and fails if a `waitUntil` promise it started rejected. After `release()`, the slot is reset like any other before it is used again. Keep `run()` for tests that need clean globals or storage.
+Runs in a lease never overlap. Each one waits for the background work it started and fails if a `waitUntil` promise it started rejected. After `release()`, the slot is reset like any other before it is used again. Keep `run()` for tests that need clean storage.
 
 ### Reusing runtimes across test files
 
-Each test file otherwise starts its own workerd runtime. When the files a Bun process runs share one global (Bun's default without `--parallel`, or `bun test --parallel --no-isolate`), the pool of a harness created for a whole file outlives that file: the next file that creates a harness with the same config, such as one from a shared factory, takes it over, so a process starts workerd once rather than once per file: each file after the first saves a workerd start (most of a second) and the runtime the pool prewarmed beside it. The runtime is reset between files exactly as between tests, so each file still starts from clean Worker globals and storage.
+Each test file otherwise starts its own workerd runtime. When the files a Bun process runs share one global (Bun's default without `--parallel`, or `bun test --parallel --no-isolate`), the pool of a harness created for a whole file outlives that file: the next file that creates a harness with the same config, such as one from a shared factory, takes it over, so a process starts workerd once rather than once per file: each file after the first saves a workerd start (most of a second) and the runtime the pool prewarmed beside it. The runtime is reset between files exactly as between tests, so each file still starts from clean storage.
 
 ```sh
 bun test --parallel --no-isolate

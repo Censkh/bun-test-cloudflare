@@ -699,7 +699,10 @@ test("uses four isolated slots and one prewarmed workerd by default when eligibl
   await harness.run(() => {});
 
   expect(createdServers.slice(serversBefore)).toHaveLength(1);
-  expect((lastOptions as { workers: unknown[] }).workers).toHaveLength(4);
+  const names = (lastOptions as { workers: Array<{ config: { name: string } }> }).workers.map(
+    (worker) => worker.config.name,
+  );
+  expect(names.filter((name) => name.startsWith("__btcf-supervisor--slot-"))).toHaveLength(4);
 });
 
 test("discards stale prewarmed servers before leasing them", async () => {

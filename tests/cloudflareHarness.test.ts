@@ -71,7 +71,13 @@ describe("Cloudflare harness fixture", () => {
     rmSync(runtimeStartLog, { force: true });
     rmSync(workerdPidLog, { force: true });
     const result = run({
-      env: { BTCF_RUNTIME_START_LOG: runtimeStartLog, BTCF_WORKERD_PID_LOG: workerdPidLog },
+      // The runtimes of the test processes themselves: with the shared slot broker, workers'
+      // runtimes are the broker's (sharedSlotBroker.test.ts).
+      env: {
+        BTCF_RUNTIME_START_LOG: runtimeStartLog,
+        BTCF_WORKERD_PID_LOG: workerdPidLog,
+        BUN_TEST_CLOUDFLARE_SHARED_SLOTS: "0",
+      },
       testArgs: [...testArgs, "--preload", "./runtimeStartLog.ts"],
       fixtureTests: ["./sharedBuild.fixture.ts", "./sharedRuntime.fixture.ts"],
       timeoutMs: 30_000,

@@ -8,6 +8,7 @@ import { createTestHarness } from "wrangler";
 import { getCapturedRuntimeCaches, runWithCloudflareCaches } from "./CacheBridge";
 import {
   activateFencedSlot,
+  configureFencedRun,
   createFencedBunCacheStorage,
   createFencedWorkerHandle,
   retireFencedSlot,
@@ -18,6 +19,7 @@ import type { CloudflareHarnessConfig, CloudflareWorkerConfig, CloudflareWorkerM
 import { getObservedBrowserRenderingLaunchCount } from "./patches/BrowserRenderingPatch";
 import { installWorkerdChildProcessPatch } from "./patches/WorkerdChildProcessPatch";
 import { RunFence } from "./RunFence";
+import type { RunVariant } from "./ServerOrchestrator";
 import {
   createRuntimeCrashMonitor,
   runWithWorkerdProcessOwner,
@@ -87,6 +89,11 @@ export const getCloudflareHarnessRunContext = <const TWorkers extends Record<str
 
   return context as CloudflareHarnessRunContext<TWorkers>;
 };
+
+export const runInHarnessContext = <TWorkers extends Record<string, CloudflareWorkerConfig>, TResult>(
+  context: CloudflareHarnessRunContext<TWorkers>,
+  callback: () => TResult,
+) => harnessRunContext.run(context, callback);
 
 const streamServerLogs = (server: TestHarness) => {
   let streamedLogs = 0;
@@ -224,6 +231,8 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
   #fence = new RunFence();
   #fencedRunCounter = 0;
   #fencedRunId = "";
+  // The vars the run taking the active slot set for itself over its Workers' (`configure`).
+  #variantVars: Record<string, Record<string, unknown>> = {};
   #cacheStorage: CacheStorage | undefined;
   #closed = false;
   #startPromise: Promise<void> | undefined;
@@ -254,6 +263,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       if (this.options.fencedSlots) {
         const activateStartedAt = performance.now();
         this.#fencedRunId = `run-${++this.#fencedRunCounter}`;
+        this.#variantVars = {};
         const supervisor = this.#server.getWorker(this.options.fencedSlots.slotSupervisorNames[this.#activeWorkerSlot]);
         await this.#untilRuntimeCrash(
           activateFencedSlot(
@@ -347,6 +357,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
       this.#logStream.flush();
       this.#activeWorkerSlot = (this.#activeWorkerSlot + 1) % slotSupervisorNames.length;
       this.#fencedRunId = `run-${++this.#fencedRunCounter}`;
+      this.#variantVars = {};
       const nextSupervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
       await this.#untilRuntimeCrash(
         activateFencedSlot(nextSupervisor, secret, this.#fencedRunId, this.#readLiveWorkerVars()),
@@ -496,6 +507,30 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     return runWithTestHarnessPersistencePath(persistencePath, callback);
   }
 
+  /** The vars of the run taking the active slot: its Workers', with its variant's over them. */
+  #runVars() {
+    const vars = this.#readLiveWorkerVars();
+    for (const [name, overrides] of Object.entries(this.#variantVars)) vars[name] = { ...vars[name], ...overrides };
+    return vars;
+  }
+
+  /**
+   * Gives the run taking this runtime its variant (`CloudflareHarness.with()`) before its code
+   * runs: the slot was activated for whichever run took it next.
+   */
+  async configure(variant: RunVariant | undefined) {
+    if (!variant) return;
+    const fencedSlots = this.options.fencedSlots;
+    if (!fencedSlots) throw new Error("A harness variant's run needs isolated Worker slots");
+    await this.#untilRuntimeCrash(this.start());
+    this.#variantVars = variant.vars;
+    const supervisor = this.#server.getWorker(fencedSlots.slotSupervisorNames[this.#activeWorkerSlot]);
+    await this.#untilRuntimeCrash(
+      configureFencedRun(supervisor, fencedSlots.secret, this.#fencedRunId, this.#runVars(), variant.settings),
+    );
+    this.#context = this.#createContext();
+  }
+
   #readLiveWorkerVars(): Record<string, Record<string, unknown>> {
     const result: Record<string, Record<string, unknown>> = {};
     for (const [index, [, workerConfig]] of this.options.workerEntries.entries()) {
@@ -524,7 +559,7 @@ export class HarnessRun<TWorkers extends Record<string, CloudflareWorkerConfig>>
     if (this.options.fencedSlots) {
       const { secret, slotSupervisorNames, workerSpecs } = this.options.fencedSlots;
       const supervisor = this.#server.getWorker(slotSupervisorNames[this.#activeWorkerSlot]);
-      const liveVars = this.#readLiveWorkerVars();
+      const liveVars = this.#runVars();
       const workers = Object.fromEntries(
         this.options.workerEntries.map(([key], workerIndex) => {
           const spec = workerSpecs[workerIndex]!;

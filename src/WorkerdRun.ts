@@ -48,6 +48,14 @@ export {
   type RunRateLimitOperation,
 } from "./WorkerdRateLimit";
 
+export {
+  createRunWorkflowBinding,
+  executeRunWorkflowOperation,
+  type RunWorkflowOperation,
+  type RunWorkflowParams,
+  terminateRunWorkflows,
+  unscopeRunWorkflowInstanceId,
+} from "./WorkerdWorkflow";
 export type RunOperation = { name: string; args: unknown[] };
 export const runEnded = "BUN_TEST_CLOUDFLARE_RUN_ENDED";
 
@@ -128,13 +136,25 @@ export abstract class RunBindingProxy<Env> extends DurableObject<Env> {
   protected abstract resetBindings(retiredRunId?: string): Promise<void>;
 }
 
-type RunCapabilityProps = { runId: string; proxy: DurableObjectStub<RunBindingProxy<unknown>> };
+type RunCapabilityProps = {
+  proxy: DurableObjectStub<RunBindingProxy<unknown> & { getRuntimeVars(workerName: string): unknown }>;
+};
 
-/** The run is fixed by the supervisor; a caller cannot choose a different generation for an RPC. */
+/**
+ * A slot's bindings, for the Worker isolates that serve its runs one after another: each call names
+ * its run, which the slot refuses once it is retired, so a stale call from an earlier run can't
+ * reach the current one's state.
+ */
 export class RunBindingCapability extends WorkerEntrypoint<unknown, RunCapabilityProps> {
-  invoke(name: string, ...args: unknown[]) {
-    const { runId, proxy } = this.ctx.props;
-    return proxy.invoke(runId, { name, args });
+  invoke(runId: string, name: string, ...args: unknown[]) {
+    return this.ctx.props.proxy.invoke(runId, { name, args });
+  }
+
+  /** The run's vars for a Worker, over its own: what the harness, or the run's variant, gave it. */
+  async vars(runId: string, workerName: string) {
+    const { proxy } = this.ctx.props;
+    if (!(await proxy.isActive(runId))) throw new Error(runEnded);
+    return proxy.getRuntimeVars(workerName);
   }
 }
 

@@ -137,7 +137,8 @@ export const preloadEndsSharedFile = (commandLine: string | null = readOwnComman
 };
 
 let ownCommandLine: string | null | undefined;
-const readOwnCommandLine = () => {
+/** This process's command line, as `ps` gives it; null when it can't be read. */
+export const readOwnCommandLine = () => {
   if (ownCommandLine === undefined) {
     try {
       ownCommandLine =

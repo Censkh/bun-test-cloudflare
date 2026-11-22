@@ -1,0 +1,27 @@
+name = "harness-variants"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+GREETING = "base"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "harness-variants"
+
+[[durable_objects.bindings]]
+name = "GREETER"
+class_name = "Greeter"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Greeter"]
+
+[[queues.producers]]
+binding = "JOBS"
+queue = "harness-variants-jobs"
+
+[[queues.consumers]]
+queue = "harness-variants-jobs"
+max_batch_timeout = 0

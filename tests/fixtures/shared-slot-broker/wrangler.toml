@@ -1,0 +1,12 @@
+name = "shared-slot-broker"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "shared-slot-broker"
+database_id = "shared-slot-broker"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "shared-slot-broker"

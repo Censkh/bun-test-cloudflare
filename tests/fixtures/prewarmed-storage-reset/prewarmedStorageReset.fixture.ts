@@ -13,18 +13,17 @@ const expectCleanState = async () => {
     ).first();
     const workerState = (await (await server.fetch("https://example.com/state")).json()) as {
       cached: string | null;
-      requestCount: number;
     };
 
     expect(table).toBeNull();
     expect(await env.KV.get(storageKey)).toBeNull();
     expect(await env.DOCUMENTS.head(storageKey)).toBeNull();
-    expect(workerState).toEqual({ cached: null, requestCount: 1 });
+    expect(workerState).toEqual({ cached: null });
     expect(await caches.default.match(hostCacheKey)).toBeUndefined();
   });
 };
 
-test("reuses isolated Worker slots with clean globals, caches, D1, KV, and R2", async () => {
+test("reuses isolated Worker slots with clean caches, D1, KV, and R2", async () => {
   await harness.run(async (workers, server) => {
     const env = await workers.WORKER.getEnv();
     await env.DB.prepare("CREATE TABLE entries (id TEXT PRIMARY KEY)").run();
@@ -37,7 +36,7 @@ test("reuses isolated Worker slots with clean globals, caches, D1, KV, and R2", 
     );
 
     const workerState = await server.fetch("https://example.com/write-cache");
-    expect(await workerState.json()).toEqual({ cached: "present", requestCount: 1 });
+    expect(await workerState.json()).toEqual({ cached: "present" });
     expect(await (await caches.default.match(hostCacheKey))?.text()).toBe("present");
   });
 
@@ -72,10 +71,7 @@ test("a finished run's dispatch handles cannot mutate the next run", async () =>
     );
     resume.resolve();
     await expect(finished.lateDispatch).rejects.toHaveProperty("name", "CloudflareHarnessRunEnded");
-    expect(await (await server.fetch("https://example.com/state")).json()).toEqual({
-      cached: null,
-      requestCount: 1,
-    });
+    expect(await (await server.fetch("https://example.com/state")).json()).toEqual({ cached: null });
   });
 });
 

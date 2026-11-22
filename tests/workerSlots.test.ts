@@ -74,15 +74,29 @@ test("only Wrangler 4.108 and later keep the rate limits of Workers other than t
   expect(wranglerKeepsSecondaryRateLimits("4.152.0")).toBeTrue();
 });
 
-test("fenced Worker slots reject unsupported, workflow, container, and unidentified storage bindings", () => {
+test("fenced Worker slots reject unsupported, container, and unidentified storage bindings", () => {
   expect(
     canUseFencedWorkerSlots([workerInput({ services: [{ binding: "EXTERNAL", service: "external-worker" }] })]),
   ).toBeFalse();
   expect(canUseFencedWorkerSlots([workerInput({ kv_namespaces: [{ binding: "KV" }] })])).toBeFalse();
   expect(canUseFencedWorkerSlots([workerInput({ containers: [{ class_name: "ContainerWorker" }] })])).toBeFalse();
+  // A Workflow whose class is in a Worker the harness doesn't run has nowhere to run in a slot.
   expect(
-    canUseFencedWorkerSlots([workerInput({ workflows: [{ binding: "FLOW", class_name: "Flow", name: "flow" }] })]),
+    canUseFencedWorkerSlots([
+      workerInput({ workflows: [{ binding: "FLOW", class_name: "Flow", name: "flow", script_name: "elsewhere" }] }),
+    ]),
   ).toBeFalse();
+});
+
+test("fenced Worker slots run Workflows, each slot its own copy, and share Vectorize", () => {
+  expect(
+    canUseFencedWorkerSlots([
+      workerInput({
+        vectorize: [{ binding: "INDEX", index_name: "index" }],
+        workflows: [{ binding: "FLOW", class_name: "Flow", name: "flow" }],
+      }),
+    ]),
+  ).toBeTrue();
 });
 
 test("fenced Worker slots support cyclic Worker bindings", () => {
@@ -114,7 +128,7 @@ test("fenced Worker slots support cyclic Worker bindings", () => {
   expect(canUseFencedWorkerSlots(workers)).toBeTrue();
 });
 
-test("fenced Worker slots create per-slot supervisors and native Durable Object hosts", () => {
+test("fenced Worker slots create per-slot supervisors and one native Durable Object host holding each slot's classes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bun-test-cloudflare-services-"));
   const main = path.join(root, "worker.js");
   fs.writeFileSync(main, "export class Counter {}\nexport default { fetch() { return new Response('ok'); } };\n");
@@ -152,25 +166,30 @@ test("fenced Worker slots create per-slot supervisors and native Durable Object 
     cleanupDir = slots.cleanupDir;
 
     expect(slots.slotSupervisorNames).toEqual(["__btcf-supervisor--slot-0", "__btcf-supervisor--slot-1"]);
-    const slot0Supervisor = (slots.inputs[0] as any).config;
-    const slot0DoHost = (slots.inputs[1] as any).config;
-    const slot1Supervisor = (slots.inputs[2] as any).config;
-    const slot1DoHost = (slots.inputs[3] as any).config;
-
-    expect(slot0Supervisor.name).toBe("__btcf-supervisor--slot-0");
-    expect(slot1Supervisor.name).toBe("__btcf-supervisor--slot-1");
-    expect(slot0DoHost.name).toBe("service-worker--btcf-do-0");
-    expect(slot1DoHost.name).toBe("service-worker--btcf-do-1");
+    const configs = slots.inputs.map((input) => (input as any).config);
+    const byName = (name: string) => configs.find((config) => config.name === name);
+    const slot0Supervisor = byName("__btcf-supervisor--slot-0");
+    const slot1Supervisor = byName("__btcf-supervisor--slot-1");
+    // One host for the Worker's classes, with a copy of each for every slot.
+    const doHost = byName("service-worker--btcf-do");
+    expect(configs.filter((config) => String(config.name).includes("--btcf-do"))).toHaveLength(1);
     expect(slot0Supervisor.durable_objects.bindings).toContainEqual({
       name: "DO_0",
-      class_name: "Counter",
-      script_name: "service-worker--btcf-do-0",
+      class_name: "Counter__btcf_slot0",
+      script_name: "service-worker--btcf-do",
     });
     expect(slot1Supervisor.durable_objects.bindings).toContainEqual({
       name: "DO_0",
-      class_name: "Counter",
-      script_name: "service-worker--btcf-do-1",
+      class_name: "Counter__btcf_slot1",
+      script_name: "service-worker--btcf-do",
     });
+    expect(doHost.durable_objects.bindings).toEqual([
+      { name: "__BTCF_SLOT_PROXY_0", class_name: "SlotBindingProxy", script_name: "__btcf-supervisor--slot-0" },
+      { name: "__BTCF_SLOT_PROXY_1", class_name: "SlotBindingProxy", script_name: "__btcf-supervisor--slot-1" },
+    ]);
+    expect(doHost.migrations).toEqual([
+      { tag: "v1", new_sqlite_classes: ["Counter__btcf_slot0", "Counter__btcf_slot1"] },
+    ]);
     expect(slots.workerSpecs[0]?.bindings.SERVICE).toEqual({ kind: "service", target: "service-worker" });
     expect(slots.workerSpecs[0]?.bindings.COUNTER).toEqual({ kind: "do", sup: "DO_0" });
   } finally {

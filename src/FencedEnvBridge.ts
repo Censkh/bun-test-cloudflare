@@ -3,11 +3,18 @@ import type { RunFence } from "./RunFence";
 import { createRunCacheStorage, type RunCacheOperation } from "./WorkerdCache";
 import { encodeScopedObjectName } from "./WorkerdDurableObject";
 import { runQueueMessage } from "./WorkerdQueue";
+import { createRunWorkflowBinding, executeRunWorkflowOperation } from "./WorkerdWorkflow";
 
 export const BTCF_SECRET_HEADER = "x-btcf-secret";
 export const BTCF_RUN_ID_HEADER = "x-btcf-run-id";
 export const BTCF_WORKER_HEADER = "x-btcf-worker";
 export const BTCF_META_HEADER = "x-btcf-meta";
+/**
+ * A dispatched request's own Origin, which the slot supervisor gives back to it: through Miniflare's
+ * platform proxy (a shared slot broker's path), the request's headers are the proxy call's, and its
+ * entry refuses an Origin that isn't one of its own hosts ("Invalid Origin header").
+ */
+export const BTCF_ORIGIN_HEADER = "x-btcf-origin";
 
 export type FencedBindingDescriptor =
   | { kind: "d1"; sup: string }
@@ -19,6 +26,7 @@ export type FencedBindingDescriptor =
   | { kind: "service"; target: string }
   | { kind: "send_email"; sup: string }
   | { kind: "analytics_engine"; sup: string }
+  | { kind: "workflow"; sup: string }
   | { kind: "native"; sup: string };
 
 export type FencedWorkerSpec = {
@@ -97,6 +105,7 @@ const fenceRateLimitBinding = (rawLimiter: RateLimit, runId: string, fence: RunF
 });
 
 type SlotProxyStub = {
+  recordCreatedWorkflow(bindingName: string, scopedId: string): Promise<void>;
   recordTouchedDo(bindingName: string, hex: string): Promise<void>;
 };
 
@@ -108,7 +117,6 @@ const fenceDurableObjectBinding = (
   fence: RunFence,
 ): DurableObjectNamespace => {
   const recorded = new Set<string>();
-  const queues = new Map<string, Promise<unknown>>();
   const originalNames = new WeakMap<object, string | undefined>();
 
   const wrapId = (nativeId: DurableObjectId, originalName: string | undefined): DurableObjectId => {
@@ -139,20 +147,6 @@ const fenceDurableObjectBinding = (
     const hex = nativeId.toString();
     const name = originalNames.get(nativeId) ?? id.name;
 
-    const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
-      const prev = queues.get(hex) ?? Promise.resolve();
-      const next = prev
-        .catch(() => {})
-        .then(() =>
-          fence.dispatch(async () => {
-            ensureRecorded(hex);
-            return await task();
-          }),
-        );
-      queues.set(hex, next);
-      return next;
-    };
-
     return new Proxy({} as DurableObjectStub, {
       get(_unused, property) {
         if (property === "id") return id;
@@ -167,7 +161,12 @@ const fenceDurableObjectBinding = (
               return rawStub.fetch(input as any, init as any);
             });
         }
-        return (...args: unknown[]) => enqueue(() => rawStub.__btcf_rpc(String(property), args));
+        // Calls reach the object concurrently, as the runtime's own stubs do.
+        return (...args: unknown[]) =>
+          fence.dispatch(() => {
+            ensureRecorded(hex);
+            return rawStub.__btcf_rpc(String(property), args);
+          });
       },
     });
   };
@@ -295,6 +294,11 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
       headers.set(BTCF_SECRET_HEADER, secret);
       headers.set(BTCF_RUN_ID_HEADER, runId);
       headers.set(BTCF_WORKER_HEADER, targetWorkerName);
+      const origin = headers.get("Origin");
+      if (origin !== null) {
+        headers.delete("Origin");
+        headers.set(BTCF_ORIGIN_HEADER, origin);
+      }
       const forwarded = new Request(request, { headers });
       return supervisor.fetch(forwarded as any);
     });
@@ -332,6 +336,19 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
             fetch: (input: RequestInfo | URL, init?: RequestInit) => dispatchWorkerFetch(desc.target, input, init),
           };
           break;
+        case "workflow": {
+          const workflow = rawEnv[desc.sup] as Workflow | undefined;
+          env[bindingName] = workflow
+            ? createRunWorkflowBinding((operation) =>
+                fence.dispatch(() =>
+                  executeRunWorkflowOperation(workflow, runId, operation, (scopedId) =>
+                    slotProxy?.recordCreatedWorkflow(desc.sup, scopedId),
+                  ),
+                ),
+              )
+            : undefined;
+          break;
+        }
         case "native":
           env[bindingName] = rawEnv[desc.sup];
           break;
@@ -395,25 +412,69 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
   } as unknown as WorkerHandle<TEnv>;
 };
 
-export const activateFencedSlot = async (
+/** What a run sets for itself over its harness's config: see `CloudflareHarness.with()`. */
+export type FencedRunSettings = {
+  /**
+   * Whether queue messages the run sends reach their consumers: for every Worker, or by consuming
+   * Worker's name (true for one not named).
+   */
+  consumeQueues?: boolean | Record<string, boolean>;
+};
+
+const postToSupervisor = async (
   supervisor: WorkerHandle,
   secret: string,
   runId: string,
-  runtimeVarsByWorker?: Record<string, Record<string, unknown>>,
-): Promise<void> => {
-  const response = await supervisor.fetch("https://bun-test-cloudflare.invalid/__btcf/activate", {
+  pathname: string,
+  body: unknown,
+  failure: string,
+) => {
+  const response = await supervisor.fetch(`https://bun-test-cloudflare.invalid${pathname}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       [BTCF_SECRET_HEADER]: secret,
       [BTCF_RUN_ID_HEADER]: runId,
     },
-    body: JSON.stringify({ runId, runtimeVarsByWorker }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`Failed activating fenced slot (${response.status}): ${await response.text()}`);
+    throw new Error(`${failure} (${response.status}): ${await response.text()}`);
   }
 };
+
+export const activateFencedSlot = (
+  supervisor: WorkerHandle,
+  secret: string,
+  runId: string,
+  runtimeVarsByWorker?: Record<string, Record<string, unknown>>,
+  settings?: FencedRunSettings,
+): Promise<void> =>
+  postToSupervisor(
+    supervisor,
+    secret,
+    runId,
+    "/__btcf/activate",
+    { runId, runtimeVarsByWorker, settings },
+    "Failed activating fenced slot",
+  );
+
+/** Gives the run in an activated slot its own vars and settings, before any of its code runs. */
+export const configureFencedRun = (
+  supervisor: WorkerHandle,
+  secret: string,
+  runId: string,
+  runtimeVarsByWorker: Record<string, Record<string, unknown>>,
+  settings: FencedRunSettings,
+): Promise<void> =>
+  postToSupervisor(
+    supervisor,
+    secret,
+    runId,
+    "/__btcf/configure",
+    { runId, runtimeVarsByWorker, settings },
+    "Failed configuring fenced run",
+  );
 
 export const retireFencedSlot = async (supervisor: WorkerHandle, secret: string): Promise<void> => {
   const response = await supervisor.fetch("https://bun-test-cloudflare.invalid/__btcf/retire", {

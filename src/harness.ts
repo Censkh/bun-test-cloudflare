@@ -41,7 +41,9 @@ import {
   takeParkedOrchestrator,
   WARM_WORKERD_POOL_SIZE,
 } from "./PrewarmedServerOrchestrator";
+import type { RunVariant } from "./ServerOrchestrator";
 import { InlineServerOrchestrator, type ServerOrchestrator } from "./ServerOrchestrator";
+import { SharedBrokerServerOrchestrator, shouldUseSharedSlotBroker } from "./SharedSlotBroker";
 import { onCreatingScopeEnd } from "./TestScope";
 import { getWorkerBuildCacheDir, restoreCachedBuild, storeBuild } from "./WorkerBuildCache";
 import { getWorkerBuildOutdir, isErrnoException, isProcessAlive, removeFinishedRunBuilds } from "./WorkerBuildOutput";
@@ -94,7 +96,29 @@ export type CloudflareHarnessLease<TWorkers extends Record<string, CloudflareWor
   release(): Promise<void>;
 };
 
+/**
+ * What a harness variant's runs set over its harness's config (`CloudflareHarness.with()`): only
+ * what a run can change without different Workers.
+ */
+export type CloudflareHarnessVariant<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
+  /** Vars each Worker's code sees, by the Worker's key in `workers`, over its config's own. */
+  vars?: { [TKey in keyof TWorkers]?: Record<string, string> };
+  /**
+   * Whether queue messages a run sends reach their consumers: for every Worker, or by consuming
+   * Worker's key (`true` for one not named, and unless set).
+   */
+  consumeQueues?: boolean | { [TKey in keyof TWorkers]?: boolean };
+};
+
 export type CloudflareHarness<TWorkers extends Record<string, CloudflareWorkerConfig>> = {
+  /**
+   * The same Workers, with `variant`'s vars and settings for its runs. With isolated Worker slots
+   * a variant shares its harness's runtimes, so a suite's one harness serves every test's variant
+   * without starting workerd again; without slots, whose Workers read their vars as workerd
+   * starts, it is a harness of its own. A variant of a variant has both, the later one's over
+   * the earlier's.
+   */
+  with(variant: CloudflareHarnessVariant<TWorkers>): CloudflareHarness<TWorkers>;
   run<TResult>(callback: CloudflareHarnessCallback<TWorkers, TResult>): Promise<TResult>;
   /**
    * Leases one Worker slot for several runs, for example from `beforeAll` to `afterAll`, instead
@@ -817,15 +841,34 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   logTiming("worker builds", buildStartedAt);
   const supportsIsolatedWorkerSlots =
     configuredIsolatedWorkerSlots === 1 ? false : canUseFencedWorkerSlots(preparedWorkers);
-  const isolatedWorkerSlots =
-    configuredIsolatedWorkerSlots ?? (supportsIsolatedWorkerSlots ? DEFAULT_ISOLATED_WORKER_SLOTS : 1);
+  // A slot count is the most a harness runs at once: Workers a slot can't host (containers,
+  // Workflows, bindings a fenced slot doesn't proxy) run in one runtime, as they always could.
+  const isolatedWorkerSlots = supportsIsolatedWorkerSlots
+    ? (configuredIsolatedWorkerSlots ?? DEFAULT_ISOLATED_WORKER_SLOTS)
+    : 1;
 
-  if (isolatedWorkerSlots > 1 && !supportsIsolatedWorkerSlots) {
-    throw new TypeError("isolatedWorkerSlots does not support one or more configured Worker bindings");
-  }
+  const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
+  const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
+  const sharedBrokerConfigKey =
+    isolatedWorkerSlots > 1 && keepsServerAlive && shouldUseSharedSlotBroker()
+      ? (() => {
+          try {
+            // Vars aren't the broker's: each lease sends its slot the leasing process's (a URL of a
+            // server that process started, say), so processes whose Workers differ only in them
+            // share one broker.
+            return JSON.stringify({
+              d1ResetMode: d1ResetMode ?? "drop",
+              serverConfig,
+              workers: preparedWorkers.map((worker) => ({ input: withoutVars(worker.input), name: worker.name })),
+            });
+          } catch {
+            return undefined;
+          }
+        })()
+      : undefined;
 
   const fencedSlots =
-    isolatedWorkerSlots > 1
+    isolatedWorkerSlots > 1 && !sharedBrokerConfigKey
       ? createFencedWorkerSlots(preparedWorkers, isolatedWorkerSlots, { d1ResetMode })
       : undefined;
 
@@ -833,7 +876,6 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     ...serverConfig,
     workers: fencedSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
   };
-  const hasBrowserRendering = preparedWorkers.some((worker) => worker.hasBrowserRendering);
   const createRun = () =>
     new HarnessRun({
       events,
@@ -846,7 +888,6 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
   // The Workers are built now, so building never counts against a test's timeout, but workerd starts
   // on the first run: a module can create a harness that a test file importing it never runs.
   let orchestrator: ServerOrchestrator<TWorkers> | undefined;
-  const keepsServerAlive = process.env.BUN_TEST_CLOUDFLARE_DISABLE_SERVER_PREWARM !== "1";
   // A harness made with the same config as one whose scope has ended (a later test file calling the
   // same shared factory) takes over its pool: its runtimes are reset between files as they are
   // between tests, rather than every file starting workerd again. The config is compared when the
@@ -861,9 +902,19 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
       orchestratorKey = keepsServerAlive ? harnessReuseKey(config) : undefined;
       orchestrator =
         takeParkedOrchestrator<TWorkers>(orchestratorKey) ??
-        (keepsServerAlive
-          ? new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize)
-          : new InlineServerOrchestrator(createRun));
+        (sharedBrokerConfigKey
+          ? new SharedBrokerServerOrchestrator({
+              d1ResetMode,
+              events,
+              isolatedWorkerSlots,
+              orchestratorKey: sharedBrokerConfigKey,
+              preparedWorkers,
+              serverConfig,
+              workerEntries,
+            })
+          : keepsServerAlive
+            ? new PrewarmedServerOrchestrator(createRun, prewarmedWorkerdPoolSize)
+            : new InlineServerOrchestrator(createRun));
     }
     return orchestrator;
   };
@@ -880,13 +931,37 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     if (current && !parkOrchestrator(orchestratorKey, current)) await current.close();
   });
 
-  const harness: CloudflareHarness<TWorkers> = {
-    serve(options) {
-      return serveHarness(harness, options);
-    },
+  const usesSlots = fencedSlots !== undefined || sharedBrokerConfigKey !== undefined;
+  /** The harness's lease, given the variant's vars and settings before any of its code runs. */
+  const acquire = async (variant: CloudflareHarnessVariant<TWorkers> | undefined) => {
+    const lease = await getOrchestrator().acquire();
+    try {
+      await lease.run.configure(variant && toRunVariant(variant, workerEntries, preparedWorkers));
+    } catch (error) {
+      await lease.release();
+      throw error;
+    }
+    return lease;
+  };
+  const createHandle = (variant: CloudflareHarnessVariant<TWorkers> | undefined): CloudflareHarness<TWorkers> => {
+    const handle: CloudflareHarness<TWorkers> = {
+      with(next) {
+        const merged = mergeVariants(variant, next);
+        return usesSlots ? createHandle(merged) : createCloudflareHarness(applyVariant(config, merged));
+      },
+      serve(options) {
+        return serveHarness(handle, options);
+      },
+      ...createRunMethods(variant),
+    };
+    return handle;
+  };
+  const createRunMethods = (
+    variant: CloudflareHarnessVariant<TWorkers> | undefined,
+  ): Pick<CloudflareHarness<TWorkers>, "lease" | "run"> => ({
     async lease() {
       const acquireStartedAt = performance.now();
-      const lease = await getOrchestrator().acquire();
+      const lease = await acquire(variant);
       logTiming("harness lease acquire", acquireStartedAt);
       let released = false;
       let previous: Promise<unknown> = Promise.resolve();
@@ -918,7 +993,7 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
     async run(callback) {
       const runStartedAt = performance.now();
       const acquireStartedAt = performance.now();
-      const lease = await getOrchestrator().acquire();
+      const lease = await acquire(variant);
       logTiming("harness acquire", acquireStartedAt);
       try {
         return await lease.run.execute(callback, { closeAfterExecute: !keepsServerAlive });
@@ -929,6 +1004,97 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
         logTiming("harness run", runStartedAt);
       }
     },
-  };
-  return harness;
+  });
+  return createHandle(undefined);
 };
+
+/** A Worker input without its vars and secrets, which each run gives its slot. */
+const withoutVars = (input: unknown) => {
+  const { secrets: _secrets, vars: _vars, ...rest } = input as { secrets?: unknown; vars?: unknown; config?: unknown };
+  if (rest.config && typeof rest.config === "object") {
+    const { vars: _configVars, ...config } = rest.config as { vars?: unknown };
+    return { ...rest, config };
+  }
+  return rest;
+};
+
+const mergeVariants = <TWorkers extends Record<string, CloudflareWorkerConfig>>(
+  earlier: CloudflareHarnessVariant<TWorkers> | undefined,
+  later: CloudflareHarnessVariant<TWorkers>,
+): CloudflareHarnessVariant<TWorkers> => {
+  const vars: Record<string, Record<string, string>> = { ...(earlier?.vars as Record<string, Record<string, string>>) };
+  for (const [key, overrides] of Object.entries(later.vars ?? {}))
+    vars[key] = { ...vars[key], ...(overrides as Record<string, string>) };
+  return {
+    vars: vars as CloudflareHarnessVariant<TWorkers>["vars"],
+    consumeQueues:
+      typeof later.consumeQueues === "object" && typeof earlier?.consumeQueues === "object"
+        ? { ...earlier.consumeQueues, ...later.consumeQueues }
+        : (later.consumeQueues ?? earlier?.consumeQueues),
+  };
+};
+
+/** A variant as its runs' slots take it: vars by Worker name. */
+const toRunVariant = <TWorkers extends Record<string, CloudflareWorkerConfig>>(
+  variant: CloudflareHarnessVariant<TWorkers>,
+  workerEntries: Array<[keyof TWorkers, CloudflareWorkerConfig]>,
+  preparedWorkers: Array<{ name: string }>,
+): RunVariant => ({
+  vars: Object.fromEntries(
+    workerEntries.flatMap(([key], index) => {
+      const vars = variant.vars?.[key];
+      return vars ? [[preparedWorkers[index]!.name, vars]] : [];
+    }),
+  ),
+  settings: {
+    consumeQueues:
+      typeof variant.consumeQueues === "object"
+        ? Object.fromEntries(
+            workerEntries.flatMap(([key], index) => {
+              const consume = (variant.consumeQueues as Partial<Record<keyof TWorkers, boolean>>)[key];
+              return consume === undefined ? [] : [[preparedWorkers[index]!.name, consume]];
+            }),
+          )
+        : (variant.consumeQueues ?? true),
+  },
+});
+
+/** Whether a variant's runs consume the queues of the Worker under `key`. */
+const consumesQueues = <TWorkers extends Record<string, CloudflareWorkerConfig>>(
+  variant: CloudflareHarnessVariant<TWorkers>,
+  key: keyof TWorkers,
+) =>
+  typeof variant.consumeQueues === "object" ? (variant.consumeQueues[key] ?? true) : (variant.consumeQueues ?? true);
+
+/** A harness's config with a variant applied, for a harness without slots, which can't vary a run. */
+const applyVariant = <TWorkers extends Record<string, CloudflareWorkerConfig>>(
+  config: CloudflareHarnessConfig<TWorkers>,
+  variant: CloudflareHarnessVariant<TWorkers>,
+): CloudflareHarnessConfig<TWorkers> => ({
+  ...config,
+  workers: Object.fromEntries(
+    Object.entries(config.workers).map(([key, worker]) => {
+      // A Worker input is a config path or an inline config, either with vars of its own.
+      const input = worker as CloudflareWorkerConfig & {
+        config?: { queues?: { consumers?: unknown[] } };
+        vars?: Record<string, unknown>;
+      };
+      const vars = variant.vars?.[key as keyof TWorkers];
+      let applied: CloudflareWorkerConfig = vars
+        ? ({ ...input, vars: { ...input.vars, ...vars } } as CloudflareWorkerConfig)
+        : worker;
+      const consume = consumesQueues(variant, key as keyof TWorkers);
+      if (!consume && input.config?.queues?.consumers?.length) {
+        applied = {
+          ...applied,
+          config: { ...input.config, queues: { ...input.config.queues, consumers: [] } },
+        } as CloudflareWorkerConfig;
+      } else if (!consume && !input.config) {
+        throw new TypeError(
+          `Worker ${key}: a variant that doesn't consume queues needs isolated Worker slots or an inline config`,
+        );
+      }
+      return [key, applied];
+    }),
+  ) as TWorkers,
+});

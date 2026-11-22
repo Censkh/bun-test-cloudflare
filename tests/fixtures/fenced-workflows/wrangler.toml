@@ -1,0 +1,12 @@
+name = "fenced-workflows"
+main = "src/worker.ts"
+compatibility_date = "2025-08-15"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "fenced-workflows"
+
+[[workflows]]
+name = "fenced-workflows-record"
+binding = "RECORD"
+class_name = "RecordWorkflow"
