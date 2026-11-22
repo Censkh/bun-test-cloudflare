@@ -150,6 +150,21 @@ test("a slotted object starts the calls made to it in the order they were made",
   });
 });
 
+test("a slotted object runs each call's settled awaits to their end before the next call starts", async () => {
+  await slottedHarness.run(async (workers) => {
+    const env = await workers.SLOTTED.getEnv();
+    const object = () => env.COUNTER.get(env.COUNTER.idFromName("batches"));
+    // Two batches sent at once: the runtime delivers each as an event of its own, so the first's
+    // values all come before the second's.
+    const batches = [
+      Array.from({ length: 20 }, (_, index) => index),
+      Array.from({ length: 20 }, (_, index) => 20 + index),
+    ];
+    await Promise.all(batches.map((batch) => object().recordEach(batch)));
+    expect(await object().started()).toEqual(batches.flat());
+  });
+});
+
 test("rotates every slot-eligible binding through a complete prewarmed generation", async () => {
   for (let run = 0; run < 5; run += 1) {
     await slottedHarness.run(async (workers) => {
