@@ -17,6 +17,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { semver } from "bun";
 import type { TestHarness, TestHarnessOptions, WorkerHandle } from "wrangler";
 import { unstable_readConfig } from "wrangler";
 import { copyAdditionalModules, getAdditionalModuleSourceRoots } from "./AdditionalModules";
@@ -687,11 +688,15 @@ const planWorkerInput = (key: string, worker: CloudflareWorkerConfig, root: stri
     env,
     additionalModuleSourceRoots,
   );
-  return { start, vars, secrets, testConfig, workerName, buildPlan };
+  const configPath = "configPath" in input ? resolveConfigPath(input.configPath, root) : undefined;
+  return { start, vars, secrets, testConfig, workerName, buildPlan, configPath };
 };
 
+// Wrangler 4.121 added prebuiltWorkerDir for config-file inputs.
+const supportsPrebuiltWorkerDir = semver.satisfies(require("wrangler/package.json").version, ">=4.121.0");
+
 const prepareWorkerInput = (
-  { start, vars, secrets, testConfig, workerName, buildPlan }: ReturnType<typeof planWorkerInput>,
+  { start, vars, secrets, testConfig, workerName, buildPlan, configPath }: ReturnType<typeof planWorkerInput>,
   buildResult: WorkerBuildResult,
 ): PreparedWorkerInput => {
   const browserConfig = (testConfig as Record<string, unknown>).browser;
@@ -703,7 +708,22 @@ const prepareWorkerInput = (
       ? browserConfig.binding
       : undefined;
 
+  const configuredRules = buildPlan.config.rules ?? [];
+  const rules = withDryRunModuleRules(configuredRules, buildPlan.outdir);
+  // Wrangler reads the original config and derives the emitted filename from its main. Keep our
+  // resolved inline config when the build needs extra Wasm rules or a differently named entry.
+  const main = buildPlan.config.main;
+  const nativeMain = main && (buildPlan.config.no_bundle ? path.basename(main) : `${path.parse(main).name}.js`);
+  const prebuiltInput =
+    configPath &&
+    supportsPrebuiltWorkerDir &&
+    rules === configuredRules &&
+    nativeMain &&
+    existsSync(path.join(buildPlan.outdir, nativeMain))
+      ? { configPath, env: buildPlan.env, prebuiltWorkerDir: buildPlan.outdir, vars, secrets }
+      : undefined;
   return {
+    prebuiltInput,
     browserBindingName,
     built: buildResult.built,
     durationMs: performance.now() - start,
@@ -715,7 +735,7 @@ const prepareWorkerInput = (
         find_additional_modules: true,
         main: buildResult.builtMain,
         no_bundle: true,
-        rules: withDryRunModuleRules(buildPlan.config.rules, buildPlan.outdir),
+        rules,
       },
       ...(vars ? { vars } : {}),
       ...(secrets ? { secrets } : {}),
@@ -875,7 +895,7 @@ export const createCloudflareHarness = <const TWorkers extends Record<string, Cl
 
   const testHarnessOptions = {
     ...serverConfig,
-    workers: fencedSlots?.inputs ?? preparedWorkers.map((worker) => worker.input),
+    workers: fencedSlots?.inputs ?? preparedWorkers.map((worker) => worker.prebuiltInput ?? worker.input),
   };
   const createRun = () =>
     new HarnessRun({

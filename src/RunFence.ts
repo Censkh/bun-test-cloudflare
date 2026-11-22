@@ -37,7 +37,21 @@ export class RunFence {
         Object.entries(Object.getOwnPropertyDescriptors(handle)).map(([name, descriptor]) => {
           const operation = descriptor.value;
           // Wrangler's WorkerHandle methods are asynchronous.
-          if (typeof operation === "function") {
+          if (name === "getExport" && typeof operation === "function") {
+            descriptor.value = () =>
+              this.dispatch(async () => {
+                const entry = (await Reflect.apply(operation, handle, [])) as object;
+                return new Proxy(entry, {
+                  get: (target, key) => {
+                    if (key === "then") return undefined;
+                    const value = Reflect.get(target, key);
+                    return typeof value === "function"
+                      ? (...args: unknown[]) => this.dispatch(() => Reflect.apply(value, target, args))
+                      : value;
+                  },
+                });
+              });
+          } else if (typeof operation === "function") {
             descriptor.value = (...args: unknown[]) => this.dispatch(() => Reflect.apply(operation, handle, args));
           }
           return [name, descriptor];

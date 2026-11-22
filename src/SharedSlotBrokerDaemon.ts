@@ -87,6 +87,7 @@ export type SharedBrokerDaemonConfig = {
 };
 
 export type SharedBrokerEndpointInfo = {
+  supportsGetExport: boolean;
   fencedSecret: string;
   parentPid: number;
   pid: number;
@@ -184,7 +185,6 @@ const runDaemon = async () => {
     server: ReturnType<typeof createTestHarness>;
     capturedDevEnvs: Array<{ runtimes?: Array<{ mf?: any }> }>;
     storageRoot: string;
-    proxyClient: { env: Record<string, any> };
     proxyServer: http.Server;
     upgradeServer: net.Server;
     upgradeUrl: string;
@@ -338,7 +338,6 @@ const runDaemon = async () => {
       server,
       capturedDevEnvs,
       storageRoot,
-      proxyClient,
       ...proxy,
       slotProxyBindings,
       slotServiceKeys,
@@ -368,7 +367,7 @@ const runDaemon = async () => {
   const releaseSlot = async ({ index }: Slot) => {
     const supervisorName = fencedSlots.slotSupervisorNames[index]!;
     try {
-      await retireFencedSlot(runtime.proxyClient.env[runtime.slotServiceKeys[supervisorName]!], fencedSlots.secret);
+      await retireFencedSlot(runtime.server.getWorker(supervisorName), fencedSlots.secret);
     } catch {
       // Slot may already be retired or shutting down.
     }
@@ -432,7 +431,7 @@ const runDaemon = async () => {
         const leaseId = crypto.randomUUID();
         try {
           await activateFencedSlot(
-            runtime.proxyClient.env[runtime.slotServiceKeys[supervisorName]!],
+            runtime.server.getWorker(supervisorName),
             fencedSlots.secret,
             runId,
             body.runtimeVarsByWorker,
@@ -502,6 +501,7 @@ const runDaemon = async () => {
   }
 
   const endpoint: SharedBrokerEndpointInfo = {
+    supportsGetExport: "getExport" in runtime.server.getWorker(fencedSlots.slotSupervisorNames[0]),
     fencedSecret: fencedSlots.secret,
     parentPid: config.parentPid,
     pid: process.pid,

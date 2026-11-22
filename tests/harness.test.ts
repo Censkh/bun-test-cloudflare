@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { semver } from "bun";
 
 type FakeWorker = {
   name?: string;
@@ -175,6 +176,10 @@ Bun.spawnSync = ((options: { cmd: string[]; cwd?: string; timeout?: number }) =>
       );
       const builtMain = path.join(plan.outdir, "worker.js");
       writeFileSync(builtMain, "export default {};");
+      writeFileSync(
+        path.join(plan.outdir, `${path.parse(String(plan.testConfig.main)).name}.js`),
+        "export default {};",
+      );
       spawnedCommands.push(["wrangler", "deploy", "--dry-run", "--config", path.join(plan.outdir, "wrangler.json")]);
       return { result: { built: true, builtMain } };
     });
@@ -239,8 +244,11 @@ const workerBuildPath = (root: string, workerName: string, file: string) =>
       `^${escapeRegExp(path.join(root, "node_modules/.btcf/worker-build", `run-${process.pid}`, workerName))}-[0-9a-f]{16}${escapeRegExp(path.sep + file)}$`,
     ),
   );
-const builtWorkerOutdir = (workerIndex = 0) =>
-  path.dirname((lastOptions as { workers: Array<{ config: { main: string } }> }).workers[workerIndex].config.main);
+const builtWorkerOutdir = (workerIndex = 0) => {
+  const worker = (lastOptions as { workers: Array<{ config: { main: string } } | { prebuiltWorkerDir: string }> })
+    .workers[workerIndex]!;
+  return "prebuiltWorkerDir" in worker ? worker.prebuiltWorkerDir : path.dirname(worker.config.main);
+};
 
 type Equal<TActual, TExpected> =
   (<T>() => T extends TActual ? 1 : 2) extends <T>() => T extends TExpected ? 1 : 2 ? true : false;
@@ -264,34 +272,51 @@ test("passes worker configs to Wrangler while preserving typed worker keys", asy
     workers = runWorkers;
   });
 
-  expect(lastOptions).toEqual({
-    root: testRoot,
-    workers: [
-      {
-        config: expect.objectContaining({
-          define: {
-            "process.env.NODE_ENV": "'test'",
-          },
-          find_additional_modules: true,
-          main: workerBuildPath(testRoot, "backend-worker", "worker.js"),
-          no_bundle: true,
-          rules: [],
-        }),
-      },
-      {
-        config: expect.objectContaining({
-          define: {
-            "process.env.NODE_ENV": "'test'",
-          },
-          find_additional_modules: true,
-          main: workerBuildPath(testRoot, "cms-worker", "worker.js"),
-          no_bundle: true,
-          rules: [],
-        }),
-        vars: { APP_ENV: "test" },
-      },
-    ],
-  });
+  if (semver.satisfies(require("wrangler/package.json").version, ">=4.121.0")) {
+    expect(lastOptions).toEqual({
+      root: testRoot,
+      workers: ["backend", "cms"].map((worker) => ({
+        configPath: path.join(testRoot, `wrangler.${worker}.toml`),
+        prebuiltWorkerDir: expect.stringMatching(
+          new RegExp(
+            escapeRegExp(
+              path.join(testRoot, "node_modules/.btcf/worker-build", `run-${process.pid}`, `${worker}-worker-`),
+            ),
+          ),
+        ),
+        ...(worker === "cms" && { vars: { APP_ENV: "test" } }),
+      })),
+    });
+  } else {
+    expect(lastOptions).toEqual({
+      root: testRoot,
+      workers: [
+        {
+          config: expect.objectContaining({
+            define: {
+              "process.env.NODE_ENV": "'test'",
+            },
+            find_additional_modules: true,
+            main: workerBuildPath(testRoot, "backend-worker", "worker.js"),
+            no_bundle: true,
+            rules: [],
+          }),
+        },
+        {
+          config: expect.objectContaining({
+            define: {
+              "process.env.NODE_ENV": "'test'",
+            },
+            find_additional_modules: true,
+            main: workerBuildPath(testRoot, "cms-worker", "worker.js"),
+            no_bundle: true,
+            rules: [],
+          }),
+          vars: { APP_ENV: "test" },
+        },
+      ],
+    });
+  }
   const configPaths = spawnedCommands.slice(-2).map((command) => command[command.indexOf("--config") + 1]);
   expect(configPaths.toSorted()).toEqual([
     path.join(builtWorkerOutdir(0), "wrangler.json"),

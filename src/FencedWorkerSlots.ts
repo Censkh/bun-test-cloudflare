@@ -781,8 +781,17 @@ export default class BtcfDynamicEntry extends WorkerEntrypoint {
   async __btcf_call(method, args) {
     return asRunCall(this.env, this.ctx, async (env, worker) => {
       const target = typeof worker === "function" ? new worker(fenceCtx(this.ctx, env), env) : worker;
-      if (typeof target?.[method] !== "function") throw new TypeError(method + " is not a function");
-      return target[method](...args);
+      // RPC exposes methods on user entrypoint prototypes, never Object or runtime internals.
+      for (let proto = typeof worker === "function" ? worker.prototype : worker;
+        proto && proto !== WorkerEntrypoint.prototype && proto !== Object.prototype;
+        proto = Object.getPrototypeOf(proto)) {
+        const descriptor = Object.getOwnPropertyDescriptor(proto, method);
+        if (!descriptor) continue;
+        if (method !== "constructor" && typeof descriptor.value === "function")
+          return descriptor.value.apply(target, args);
+        break;
+      }
+      throw new TypeError(method + " is not an RPC method");
     });
   }
 
@@ -1319,26 +1328,34 @@ export class SlotBindingProxy extends RunBindingProxy {
   }
 }
 
-export default {
-  async fetch(request, env, ctx) {
+export default class SlotSupervisor extends WorkerEntrypoint {
+  async updateSlot(secret, action, update) {
+    if (secret !== SECRET) throw new Error("Forbidden");
+    const proxy = this.env.SLOT_PROXY.getByName("slot");
+    if (action === "retire") return proxy.retire();
+    const { runId, runtimeVarsByWorker, settings } = update;
+    if (action === "activate") return proxy.activateWithVars(runId, runtimeVarsByWorker, settings);
+    if (action === "configure") return proxy.configure(runId, runtimeVarsByWorker, settings);
+    throw new TypeError("Unknown slot lifecycle operation");
+  }
+
+  async callWorker(secret, runId, workerName, method, args) {
+    if (secret !== SECRET) throw new Error("Forbidden");
+    const proxy = this.env.SLOT_PROXY.getByName("slot");
+    return proxy.invoke(runId, { name: "servicecall:" + workerName, args: [{ method, args }] });
+  }
+
+  async fetch(request) {
+    const { env, ctx } = this;
     if (request.headers.get(${JSON.stringify(BTCF_SECRET_HEADER)}) !== SECRET) {
       return new Response("Forbidden", { status: 403 });
     }
     const url = new URL(request.url);
     const proxy = env.SLOT_PROXY.getByName("slot");
 
-    if (url.pathname === "/__btcf/activate") {
-      const { runId, runtimeVarsByWorker, settings } = await request.json();
-      await proxy.activateWithVars(runId, runtimeVarsByWorker, settings);
-      return new Response(null, { status: 204 });
-    }
-    if (url.pathname === "/__btcf/configure") {
-      const { runId, runtimeVarsByWorker, settings } = await request.json();
-      await proxy.configure(runId, runtimeVarsByWorker, settings);
-      return new Response(null, { status: 204 });
-    }
-    if (url.pathname === "/__btcf/retire") {
-      await proxy.retire();
+    if (["/__btcf/activate", "/__btcf/configure", "/__btcf/retire"].includes(url.pathname)) {
+      const action = url.pathname.slice("/__btcf/".length);
+      await this.updateSlot(SECRET, action, action === "retire" ? undefined : await request.json());
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/__btcf/cache") {
@@ -1415,9 +1432,10 @@ export default {
       return new Response(fixed.readable, response);
     }
     return response;
-  },
+  }
 
-  async queue(batch, env, ctx) {
+  async queue(batch) {
+    const { env, ctx } = this;
     const consumerMap = JSON.parse(env.__BTCF_QUEUE_CONSUMERS || "{}");
     const target = consumerMap[batch.queue];
     if (!target) {
@@ -1457,8 +1475,8 @@ export default {
         }
       },
     );
-  },
-};
+  }
+}
 `;
   writeFileSync(supervisorMainPath, supervisorCode);
 

@@ -37,6 +37,7 @@ import {
 type WorkerInput = TestHarnessOptions["workers"][number];
 
 export type PreparedWorkerInput = {
+  prebuiltInput?: WorkerInput;
   browserBindingName: string | undefined;
   built: boolean;
   durationMs: number;

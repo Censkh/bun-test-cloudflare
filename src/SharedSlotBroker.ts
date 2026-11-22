@@ -487,6 +487,7 @@ export class SharedBrokerServerOrchestrator<TWorkers extends Record<string, Clou
 
     const serviceFetcher = proxyClient.env[lease.serviceKey] as Fetcher;
     const remoteSupervisor = {
+      ...(endpoint.supportsGetExport && { getExport: async () => serviceFetcher }),
       fetch: (input: RequestInfo | URL, init?: RequestInit) => serviceFetcher.fetch(input as any, init as any),
       getEnv: async () =>
         Object.fromEntries(

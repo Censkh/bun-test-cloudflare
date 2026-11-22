@@ -89,8 +89,13 @@ When a worker uses `configPath`, `bun-test-cloudflare` reads that Wrangler confi
 once per matching Worker configuration and Bun test run. Independent Worker builds run concurrently;
 if any Worker has a custom build command, builds run in their configured order. Build output is
 isolated under `node_modules/.btcf/worker-build/run-<id>/`. Test runs then use that script
-with `no_bundle = true`, so Wrangler does not rerun its esbuild bundle step for every
-`run()`.
+without rebundling. On Wrangler 4.121.0 and later, config-file Workers use `prebuiltWorkerDir`
+when Wrangler can load the emitted entry and its modules using the original rules. Generated slot
+Workers, inline configs, and builds that need extra module rules use a resolved inline config.
+
+On Wrangler 4.106.0 and later, `await workers.API.getExport()` gives a test access to the
+default Worker's RPC methods. Obtain the export inside `harness.run()`. Calls use that run's
+bindings, and the handle expires when the run ends.
 
 ## Use In Tests
 

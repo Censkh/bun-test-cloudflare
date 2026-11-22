@@ -357,8 +357,27 @@ export const createFencedWorkerHandle = <TEnv = Record<string, unknown>>(options
     return env as TEnv;
   };
 
+  const fetch = (input: RequestInfo | URL, init?: RequestInit) => dispatchWorkerFetch(spec.name, input, init);
+  const rpcSupervisor = supervisor as unknown as SupervisorHandle;
   return {
-    fetch: (input: RequestInfo | URL, init?: RequestInit) => dispatchWorkerFetch(spec.name, input, init),
+    ...(rpcSupervisor.getExport && {
+      getExport: () =>
+        fence.dispatch(async () => {
+          const entry = await rpcSupervisor.getExport!();
+          return new Proxy(
+            { fetch },
+            {
+              get(target, method) {
+                if (method === "fetch") return target.fetch;
+                if (typeof method !== "string" || method === "then" || method in Object.prototype) return undefined;
+                return (...args: unknown[]) =>
+                  fence.dispatch(() => entry.callWorker(secret, runId, spec.name, method, args));
+              },
+            },
+          );
+        }),
+    }),
+    fetch,
     getEnv: () => {
       fence.assertActive();
       cachedEnvPromise ??= buildEnv();
@@ -421,26 +440,36 @@ export type FencedRunSettings = {
   consumeQueues?: boolean | Record<string, boolean>;
 };
 
-const postToSupervisor = async (
-  supervisor: WorkerHandle,
+type SlotUpdate = {
+  runId: string;
+  runtimeVarsByWorker?: Record<string, Record<string, unknown>>;
+  settings?: FencedRunSettings;
+};
+
+type SupervisorHandle = Pick<WorkerHandle, "fetch"> & {
+  getExport?: () => Promise<{
+    callWorker(secret: string, runId: string, name: string, method: string, args: unknown[]): Promise<unknown>;
+    updateSlot(secret: string, action: "activate" | "configure" | "retire", update?: SlotUpdate): Promise<void>;
+  }>;
+};
+const updateSlot = async (
+  handle: WorkerHandle,
   secret: string,
-  runId: string,
-  pathname: string,
-  body: unknown,
-  failure: string,
+  action: "activate" | "configure" | "retire",
+  update?: SlotUpdate,
 ) => {
-  const response = await supervisor.fetch(`https://bun-test-cloudflare.invalid${pathname}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      [BTCF_SECRET_HEADER]: secret,
-      [BTCF_RUN_ID_HEADER]: runId,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error(`${failure} (${response.status}): ${await response.text()}`);
+  const supervisor = handle as unknown as SupervisorHandle;
+  if (supervisor.getExport) {
+    const entry = await supervisor.getExport();
+    await entry.updateSlot(secret, action, update);
+    return;
   }
+  const response = await supervisor.fetch(`https://bun-test-cloudflare.invalid/__btcf/${action}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", [BTCF_SECRET_HEADER]: secret },
+    body: JSON.stringify(update),
+  });
+  if (!response.ok) throw new Error(`Fenced slot ${action} failed (${response.status}): ${await response.text()}`);
 };
 
 export const activateFencedSlot = (
@@ -449,41 +478,14 @@ export const activateFencedSlot = (
   runId: string,
   runtimeVarsByWorker?: Record<string, Record<string, unknown>>,
   settings?: FencedRunSettings,
-): Promise<void> =>
-  postToSupervisor(
-    supervisor,
-    secret,
-    runId,
-    "/__btcf/activate",
-    { runId, runtimeVarsByWorker, settings },
-    "Failed activating fenced slot",
-  );
+) => updateSlot(supervisor, secret, "activate", { runId, runtimeVarsByWorker, settings });
 
-/** Gives the run in an activated slot its own vars and settings, before any of its code runs. */
 export const configureFencedRun = (
   supervisor: WorkerHandle,
   secret: string,
   runId: string,
   runtimeVarsByWorker: Record<string, Record<string, unknown>>,
   settings: FencedRunSettings,
-): Promise<void> =>
-  postToSupervisor(
-    supervisor,
-    secret,
-    runId,
-    "/__btcf/configure",
-    { runId, runtimeVarsByWorker, settings },
-    "Failed configuring fenced run",
-  );
+) => updateSlot(supervisor, secret, "configure", { runId, runtimeVarsByWorker, settings });
 
-export const retireFencedSlot = async (supervisor: WorkerHandle, secret: string): Promise<void> => {
-  const response = await supervisor.fetch("https://bun-test-cloudflare.invalid/__btcf/retire", {
-    method: "POST",
-    headers: {
-      [BTCF_SECRET_HEADER]: secret,
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`Failed retiring fenced slot (${response.status}): ${await response.text()}`);
-  }
-};
+export const retireFencedSlot = (supervisor: WorkerHandle, secret: string) => updateSlot(supervisor, secret, "retire");

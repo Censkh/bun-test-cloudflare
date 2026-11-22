@@ -9,6 +9,7 @@ describe("service binding RPC in fenced Worker slots", () => {
     ({ run }) => {
       const result = run({ timeoutMs: 60_000 });
       result.expectStatusCode(0);
+      run({ env: { BUN_TEST_CLOUDFLARE_SHARED_SLOTS: "2" }, timeoutMs: 60_000 }).expectStatusCode(0);
     },
     120_000,
   );
