@@ -58,6 +58,7 @@ installMiniflareSourcePatch({
   proxyCallRetention: shouldInstallCompatibilityPatch("miniflare-proxy-call-retention"),
   stoppableSocketTracking: shouldInstallCompatibilityPatch("miniflare-stoppable-socket-tracking"),
   loopbackBodyCancellation: shouldInstallCompatibilityPatch("miniflare-loopback-body-cancellation"),
+  proxyPropertyStubDisposal: shouldInstallCompatibilityPatch("miniflare-proxy-property-stub-disposal"),
 });
 installCompatibilityPatch("miniflare-web-globals", installMiniflareWebGlobalsPatch);
 installWranglerEsbuildPatch({

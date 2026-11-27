@@ -171,6 +171,46 @@ export const loopbackBodyCancellation: MiniflareSourceTransform = {
   ],
 };
 
+/** Where Miniflare's bundle hands its core entry Worker's source for the harness to transform. */
+const ENTRY_WORKER_HOOK = "bun-test-cloudflare.miniflareEntryWorker";
+
+/**
+ * Miniflare reads its core entry Worker, which workerd runs the platform proxy's server in, from its
+ * own file when it starts a runtime. This routes that read through the harness, so the entry Worker
+ * transforms `installMiniflareSourcePatch` enables apply to the source workerd runs.
+ */
+export const entryWorkerHook: MiniflareSourceTransform = {
+  marker: '"core/entry.worker.js"',
+  name: "the core entry Worker's source",
+  replacements: [
+    {
+      pattern:
+        /(const filePath = [\w$.]+\(__dirname, "workers", "core\/entry\.worker\.js"\);\s*[\w$]+ = )([\w$.]+\.readFileSync\(filePath, "utf8"\))/g,
+      replace: (_match, assignment, read) =>
+        `${assignment}((source) => globalThis[Symbol.for(${JSON.stringify(ENTRY_WORKER_HOOK)})]?.(source) ?? source)(${read})`,
+    },
+  ],
+};
+
+/**
+ * To tell whether a binding's property is a method, the platform proxy's server awaits it on a
+ * Durable Object or service stub, which fetches the method itself as an RPC stub, then answers
+ * "function" and drops the stub. workerd collects it undisposed and logs "An RPC stub was not
+ * disposed properly" for every method the test process looked up. The server now disposes the stub
+ * it fetched once it knows the answer.
+ */
+export const proxyPropertyStubDisposal: MiniflareSourceTransform = {
+  marker: 'result?.constructor.name === "RpcProperty" && (result = await result)',
+  name: "the platform proxy's disposal of fetched method stubs",
+  replacements: [
+    {
+      pattern: /result\?\.constructor\.name === "RpcProperty" && \(result = await result\)/g,
+      replace: () =>
+        'result?.constructor.name === "RpcProperty" && (result = await result, typeof result == "function" && result[Symbol.dispose]?.())',
+    },
+  ],
+};
+
 export type MiniflareSourceTransformResult = {
   applied: string[];
   /** Transforms whose target code Miniflare still has, in a shape they no longer match. */
@@ -216,14 +256,29 @@ export const installMiniflareSourcePatch = (enabled: {
   proxyCallRetention: boolean;
   stoppableSocketTracking: boolean;
   loopbackBodyCancellation: boolean;
+  proxyPropertyStubDisposal: boolean;
 }) => {
+  const entryWorkerTransforms = enabled.proxyPropertyStubDisposal ? [proxyPropertyStubDisposal] : [];
   const transforms = [
     ...(enabled.capnpArenaGrowth ? [capnpArenaGrowth] : []),
     ...(enabled.proxyCallRetention ? [proxyCallRetention] : []),
     ...(enabled.stoppableSocketTracking ? [stoppableSocketTracking] : []),
     ...(enabled.loopbackBodyCancellation ? [loopbackBodyCancellation] : []),
+    ...(entryWorkerTransforms.length > 0 ? [entryWorkerHook] : []),
   ];
   if (transforms.length === 0) return;
+  if (entryWorkerTransforms.length > 0) {
+    let warned = false;
+    (globalThis as Record<symbol, unknown>)[Symbol.for(ENTRY_WORKER_HOOK)] = (source: string) => {
+      const result = applyMiniflareSourceTransforms(source, entryWorkerTransforms);
+      if (!warned)
+        for (const name of result.unmatched) {
+          warn(`This Miniflare version's ${name} doesn't match the harness's patch, so it runs unpatched.`);
+        }
+      warned = true;
+      return result.source;
+    };
+  }
 
   const wranglerPackageJsonPath = localRequire.resolve("wrangler/package.json");
   const miniflarePath = localRequire.resolve("miniflare", { paths: [path.dirname(wranglerPackageJsonPath)] });

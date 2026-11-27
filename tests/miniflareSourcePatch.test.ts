@@ -5,16 +5,19 @@ import path from "node:path";
 import {
   applyMiniflareSourceTransforms,
   capnpArenaGrowth,
+  entryWorkerHook,
   loopbackBodyCancellation,
   proxyCallRetention,
+  proxyPropertyStubDisposal,
   stoppableSocketTracking,
 } from "../src/patches/MiniflareSourcePatch";
 
-const installedMiniflareSource = () =>
-  readFileSync(
-    require.resolve("miniflare", { paths: [path.dirname(require.resolve("wrangler/package.json"))] }),
-    "utf8",
-  );
+const installedMiniflarePath = () =>
+  require.resolve("miniflare", { paths: [path.dirname(require.resolve("wrangler/package.json"))] });
+const installedMiniflareSource = () => readFileSync(installedMiniflarePath(), "utf8");
+/** The core entry Worker, which workerd runs the platform proxy's server in. */
+const installedEntryWorkerSource = () =>
+  readFileSync(path.join(path.dirname(installedMiniflarePath()), "workers/core/entry.worker.js"), "utf8");
 
 // capnp-es's single-segment allocator before and after Miniflare 5 made it double the buffer.
 const clampedArenaAllocator = `function allocate$1(minSize, segments, s) {
@@ -38,12 +41,74 @@ test("the Miniflare source transforms fit the installed Miniflare", () => {
     proxyCallRetention,
     stoppableSocketTracking,
     loopbackBodyCancellation,
+    entryWorkerHook,
   ]);
 
   expect(unmatched).toEqual([]);
   expect(applied).toContain(proxyCallRetention.name);
   expect(applied).toContain(stoppableSocketTracking.name);
   expect(applied).toContain(loopbackBodyCancellation.name);
+  expect(applied).toContain(entryWorkerHook.name);
+  expect(applyMiniflareSourceTransforms(installedEntryWorkerSource(), [proxyPropertyStubDisposal])).toMatchObject({
+    applied: [proxyPropertyStubDisposal.name],
+    unmatched: [],
+  });
+});
+
+/**
+ * The platform proxy server's answer to a property read, from the installed entry Worker with
+ * `transforms` applied: a 204 marked "Function" for a method, or the value it would serialize.
+ */
+const installedProxyGet = (transforms: Parameters<typeof applyMiniflareSourceTransforms>[1]) => {
+  const source = installedEntryWorkerSource();
+  const start = source.indexOf("if (opHeader === ProxyOps.GET) {");
+  const end = source.indexOf("} else if (opHeader === ProxyOps.GET_OWN_DESCRIPTOR)", start);
+  const body = applyMiniflareSourceTransforms(
+    source.slice(start + "if (opHeader === ProxyOps.GET) {".length, end),
+    transforms,
+  ).source;
+  const AsyncFunction = (async () => {}).constructor as new (
+    ...args: string[]
+  ) => (...args: unknown[]) => Promise<unknown>;
+  const get = new AsyncFunction("target", "keyHeader", "CoreHeaders", `let result;${body}return result;`);
+  return (target: unknown, key: string | null) => get(target, key, { OP_RESULT_TYPE: "MF-Op-Result-Type" });
+};
+
+/** A Durable Object stub's method as workerd fetches it when awaited: a stub that can be disposed. */
+const methodStub = () => {
+  const stub = Object.assign(() => {}, { disposed: 0 });
+  (stub as unknown as Record<symbol, () => void>)[Symbol.dispose] = () => {
+    stub.disposed += 1;
+  };
+  class RpcProperty {
+    // biome-ignore lint/suspicious/noThenProperty: workerd's RpcProperty is awaitable.
+    then(resolve: (value: unknown) => void) {
+      resolve(stub);
+    }
+  }
+  return { stub, target: { run: new RpcProperty() } };
+};
+
+test("the platform proxy disposes a method stub it fetched to tell a method from a property", async () => {
+  const { stub, target } = methodStub();
+
+  const answer = (await installedProxyGet([proxyPropertyStubDisposal])(target, "run")) as Response;
+
+  expect(answer.status).toBe(204);
+  expect(answer.headers.get("MF-Op-Result-Type")).toBe("Function");
+  expect(stub.disposed).toBe(1);
+});
+
+test("the platform proxy leaves alone a function it holds rather than fetched", async () => {
+  const held = Object.assign(() => {}, { disposed: 0 });
+  (held as unknown as Record<symbol, () => void>)[Symbol.dispose] = () => {
+    held.disposed += 1;
+  };
+
+  const answer = (await installedProxyGet([proxyPropertyStubDisposal])(held, null)) as Response;
+
+  expect(answer.status).toBe(204);
+  expect(held.disposed).toBe(0);
 });
 
 test("capnp's clamped arena growth doubles the buffer instead", () => {

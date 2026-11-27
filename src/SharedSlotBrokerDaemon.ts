@@ -57,6 +57,7 @@ installMiniflareSourcePatch({
   proxyCallRetention: shouldInstallCompatibilityPatch("miniflare-proxy-call-retention"),
   stoppableSocketTracking: shouldInstallCompatibilityPatch("miniflare-stoppable-socket-tracking"),
   loopbackBodyCancellation: shouldInstallCompatibilityPatch("miniflare-loopback-body-cancellation"),
+  proxyPropertyStubDisposal: shouldInstallCompatibilityPatch("miniflare-proxy-property-stub-disposal"),
 });
 if (shouldInstallCompatibilityPatch("miniflare-web-globals")) {
   installMiniflareWebGlobalsPatch();

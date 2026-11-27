@@ -14,6 +14,7 @@ installMiniflareSourcePatch({
   proxyCallRetention: false,
   stoppableSocketTracking: false,
   loopbackBodyCancellation: false,
+  proxyPropertyStubDisposal: false,
 });
 
 // Shaped like a harness generation: several slots, each a large bundle followed by small modules and bindings.

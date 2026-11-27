@@ -69,6 +69,9 @@ export const COMPATABILITY_PATCHES = {
   // Miniflare's loopback request bodies close after a read that settles once their consumer cancelled
   // (MiniflareSourcePatch.ts).
   "miniflare-loopback-body-cancellation": { id: "miniflare-loopback-body-cancellation", disabledFromVersion: null },
+  // Miniflare's proxy server drops the method stubs it fetches to tell a method from a property
+  // (MiniflareSourcePatch.ts).
+  "miniflare-proxy-property-stub-disposal": { id: "miniflare-proxy-property-stub-disposal", disabledFromVersion: null },
   "cloudflare-workers": { id: "cloudflare-workers", disabledFromVersion: null },
   "cloudflare-workers-durable-object": { id: "cloudflare-workers-durable-object", disabledFromVersion: null },
   "cloudflare-workers-worker-entrypoint": { id: "cloudflare-workers-worker-entrypoint", disabledFromVersion: null },
